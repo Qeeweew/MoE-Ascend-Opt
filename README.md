@@ -1,7 +1,3 @@
-这是一份为您准备的完整 `README.md`，使用中文编写，涵盖了项目背景、优化原理、性能数据、技术细节（垂直融合、Triton 使用）以及安装和启动说明。
-
----
-
 # MoE-Ascend-Opt: 华为 NPU 上的高性能 AWQ MoE 推理优化
 
 ![Platform](https://img.shields.io/badge/Platform-Huawei%20Ascend%20910B-red)
