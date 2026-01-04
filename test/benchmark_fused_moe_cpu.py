@@ -108,7 +108,7 @@ class BenchmarkRunner:
     def __call__(self, hidden_states, topk_weights, topk_ids):
         h = self.handles[self.iter_idx % self.num_handles]
         # 执行 forward（返回新 tensor，但 benchmark stmt 会丢弃返回值）
-        nanovllm_ext.execute_moe_cpu_routed(h, hidden_states, topk_ids, topk_weights, TOP_K)
+        torch.ops.nanovllm.moe_forward(hidden_states, topk_ids, topk_weights, h)
         self.iter_idx += 1
 
     def reset(self):
@@ -131,11 +131,10 @@ def main():
     print("\nInitializing handles & loading dummy quantized weights (row-major -> repack in C++) ...")
     moe_handles = []
     for i in range(NUM_WEIGHT_SETS):
-        handle = nanovllm_ext.create_moe_infer_handle(NUM_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE)
+        handle = torch.classes.nanovllm.MoEInfer(NUM_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE)
         gate_up_qs, gate_up_d, down_qs, down_d = create_dummy_quantized_weights_rowmajor()
 
-        # 如果你本地函数名是 moe_infer_store_quantized，则替换掉下面这一行
-        nanovllm_ext.moe_infer_store_quantized_repack(handle, gate_up_qs, gate_up_d, down_qs, down_d)
+        handle.store_quantized_repack(gate_up_qs, gate_up_d, down_qs, down_d)
 
         moe_handles.append(handle)
     print("Setup finished.\n")
