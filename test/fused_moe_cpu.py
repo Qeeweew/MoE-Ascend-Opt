@@ -110,18 +110,16 @@ def main():
     w_down = torch.randn(NUM_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE, dtype=torch.float16) * std
 
     # --------- create MoEInfer handle and online quantize ----------
-    handle = nanovllm_ext.create_moe_infer_handle(
-        NUM_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE
-    )
+    handle = torch.classes.nanovllm.MoEInfer(NUM_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE)
 
     t0 = time.time()
     # Quantization expects CPU float32 weights
     # gate_proj / up_proj: [I, H]
     # down_proj: [H, I]
     for e in range(NUM_EXPERTS):
-        nanovllm_ext.moe_infer_quantize_and_store(handle, e, "gate_proj", w_gate[e].to(torch.float32).contiguous())
-        nanovllm_ext.moe_infer_quantize_and_store(handle, e, "up_proj", w_up[e].to(torch.float32).contiguous())
-        nanovllm_ext.moe_infer_quantize_and_store(handle, e, "down_proj", w_down[e].to(torch.float32).contiguous())
+        handle.quantize_and_store_expert(e, "gate_proj", w_gate[e].to(torch.float32).contiguous())
+        handle.quantize_and_store_expert(e, "up_proj", w_up[e].to(torch.float32).contiguous())
+        handle.quantize_and_store_expert(e, "down_proj", w_down[e].to(torch.float32).contiguous())
     t1 = time.time()
     print(f"[quantize] done in {(t1 - t0):.3f}s")
 
@@ -142,7 +140,7 @@ def main():
 
         # --------- run extension CPU routed (returns new tensor) ----------
         t0 = time.time()
-        y_ext = nanovllm_ext.execute_moe_cpu_routed(handle, x, topk_ids, topk_w, TOP_K)
+        y_ext = torch.ops.nanovllm.moe_forward(x, topk_ids, topk_w, handle)
         t1 = time.time()
 
         # --------- run fp16 reference ----------
