@@ -497,12 +497,10 @@ void moe_q8_forward_ptr_impl(
     const at::Half* down_proj_d_packed,
     int64_t num_tokens, int64_t hidden_dim, int64_t num_experts,
     int64_t intermediate_size,
+    int64_t tp_size,
     int64_t top_k)
 {
-    TORCH_CHECK(hidden_dim % QK8_0 == 0, "hidden_dim must be multiple of 32");
-    TORCH_CHECK(intermediate_size % QK8_0 == 0, "intermediate_size must be multiple of 32");
-    TORCH_CHECK(top_k == 1 || top_k == 8, "top_k must be 1 or 8");
-
+    const int64_t intermediate_shard = intermediate_size / tp_size;
     const int64_t hidden_dim_k_blocks = hidden_dim / QK8_0;
 
     std::vector<int> expert_counts(num_experts, 0);
@@ -521,16 +519,19 @@ void moe_q8_forward_ptr_impl(
     }
 
     constexpr int M_BLOCK = 32;
-    struct MoeTask { int expert_id, num_tokens, global_token_start_pos; };
+    struct MoeTask { int expert_id, tp_rank, num_tokens, global_token_start_pos; };
     std::vector<MoeTask> tasks;
-    tasks.reserve((size_t)total_expert_tokens / M_BLOCK + (size_t)num_experts);
+    tasks.reserve((size_t)total_expert_tokens / M_BLOCK * (size_t)tp_size + (size_t)num_experts * (size_t)tp_size);
 
     for (int exp_id = 0; exp_id < (int)num_experts; ++exp_id) {
         const int count = expert_counts[exp_id];
         if (count == 0) continue;
         const int start_pos = expert_starts[exp_id];
         for (int offset = 0; offset < count; offset += M_BLOCK) {
-            tasks.push_back({exp_id, std::min(M_BLOCK, count - offset), start_pos + offset});
+            const int cnt_blk = std::min(M_BLOCK, count - offset);
+            for (int tp = 0; tp < (int)tp_size; ++tp) {
+                tasks.push_back({exp_id, tp, cnt_blk, start_pos + offset});
+            }
         }
     }
     const int task_count = (int)tasks.size();
@@ -540,9 +541,11 @@ void moe_q8_forward_ptr_impl(
     float*  x_d  = (float*) std::aligned_alloc(64, (size_t)num_tokens * hidden_dim_k_blocks * sizeof(float));
     TORCH_CHECK(x_qs && x_d, "Failed to allocate x_qs/x_d");
 
-    // expert_intermediate2: [total_expert_tokens, hidden_dim]
-    float* expert_intermediate2 = (float*)std::aligned_alloc(64, (size_t)total_expert_tokens * hidden_dim * sizeof(float));
-    TORCH_CHECK(expert_intermediate2, "Failed to allocate expert_intermediate2");
+    // Per-TP partial outputs: [tp_size, total_expert_tokens, hidden_dim]
+    float* expert_out_tp = (float*)std::aligned_alloc(
+        64, (size_t)tp_size * (size_t)total_expert_tokens * (size_t)hidden_dim * sizeof(float));
+    TORCH_CHECK(expert_out_tp, "Failed to allocate expert_out_tp");
+    std::memset(expert_out_tp, 0, (size_t)tp_size * (size_t)total_expert_tokens * (size_t)hidden_dim * sizeof(float));
 
     const int omp_max_threads = omp_get_max_threads();
     std::atomic<int> task_counter;
@@ -550,7 +553,7 @@ void moe_q8_forward_ptr_impl(
 
     #pragma omp parallel num_threads(omp_max_threads)
     {
-        ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_size, (int)(2 * intermediate_size));
+        ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
 
         // A) per-token quantize
         #pragma omp for
@@ -571,14 +574,23 @@ void moe_q8_forward_ptr_impl(
         auto process_task = [&](int task_idx) {
             const auto& task = tasks[task_idx];
             const int exp_id = task.expert_id;
+            const int tp_rank = task.tp_rank;
             const int count = task.num_tokens;
             const int global_start_pos = task.global_token_start_pos;
 
-            const int8_t* gate_up_qs_ptr = gate_up_qs_packed + (int64_t)exp_id * (2 * intermediate_size) * hidden_dim;
-            const at::Half* gate_up_d_ptr = gate_up_d_packed + (int64_t)exp_id * (2 * intermediate_size) * (hidden_dim / QK8_0);
+            const int64_t shard_idx = (int64_t)exp_id * tp_size + tp_rank;
 
-            const int8_t* down_proj_qs_ptr = down_proj_qs_packed + (int64_t)exp_id * hidden_dim * intermediate_size;
-            const at::Half* down_proj_d_ptr = down_proj_d_packed + (int64_t)exp_id * hidden_dim * (intermediate_size / QK8_0);
+            // gate_up shard: [2*Ish, H]
+            const int8_t* gate_up_qs_ptr =
+                gate_up_qs_packed + shard_idx * (2 * intermediate_shard) * hidden_dim;
+            const at::Half* gate_up_d_ptr =
+                gate_up_d_packed  + shard_idx * (2 * intermediate_shard) * (hidden_dim / QK8_0);
+
+            // down shard: [H, Ish]
+            const int8_t* down_proj_qs_ptr =
+                down_proj_qs_packed + shard_idx * hidden_dim * intermediate_shard;
+            const at::Half* down_proj_d_ptr =
+                down_proj_d_packed  + shard_idx * hidden_dim * (intermediate_shard / QK8_0);
 
             pack_A_q8_0_from_quantized_indirect<ExecutionPolicy::Sequential>(
                 count, (int)hidden_dim, x_qs, x_d, token_map.data(), global_start_pos,
@@ -586,25 +598,29 @@ void moe_q8_forward_ptr_impl(
             );
 
             gemm_q8_0_compute_packed<ExecutionPolicy::Sequential>(
-                count, (int)(2 * intermediate_size), (int)hidden_dim,
+                count, (int)(2 * intermediate_shard), (int)hidden_dim,
                 ws.A_qs_packed1, ws.A_d_packed1,
                 gate_up_qs_ptr, reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
-                ws.expert_intermediate1, (int)(2 * intermediate_size)
+                ws.expert_intermediate1, (int)(2 * intermediate_shard)
             );
 
-            silu_and_mul<ExecutionPolicy::Sequential>(ws.expert_intermediate1, count, (int)(2 * intermediate_size));
+            silu_and_mul<ExecutionPolicy::Sequential>(ws.expert_intermediate1, count, (int)(2 * intermediate_shard));
 
+            // Quantize only the first half [count, Ish], lda still 2*Ish
             quantize_pack_A_q8_0<ExecutionPolicy::Sequential, float>(
-                count, (int)intermediate_size,
-                ws.expert_intermediate1, (int)(2 * intermediate_size),
+                count, (int)intermediate_shard,
+                ws.expert_intermediate1, (int)(2 * intermediate_shard),
                 ws.A_qs_packed2, ws.A_d_packed2
             );
 
+            float* out = expert_out_tp +
+                ((int64_t)tp_rank * total_expert_tokens + global_start_pos) * hidden_dim;
+
             gemm_q8_0_compute_packed<ExecutionPolicy::Sequential>(
-                count, (int)hidden_dim, (int)intermediate_size,
+                count, (int)hidden_dim, (int)intermediate_shard,
                 ws.A_qs_packed2, ws.A_d_packed2,
                 down_proj_qs_ptr, reinterpret_cast<const ggml_half*>(down_proj_d_ptr),
-                expert_intermediate2 + (int64_t)global_start_pos * hidden_dim, (int)hidden_dim
+                out, (int)hidden_dim
             );
         };
 
@@ -616,7 +632,7 @@ void moe_q8_forward_ptr_impl(
 
         #pragma omp barrier
 
-        // Scatter & weight accumulate to y_out
+        // Scatter & (TP all-reduce) & routing-weight accumulate to y_out
         #pragma omp for
         for (int64_t t = 0; t < num_tokens; ++t) {
             float* acc = ws.temp_row_buffer;
@@ -628,8 +644,15 @@ void moe_q8_forward_ptr_impl(
                 if (src_row_idx == -1) continue;
 
                 const float w = routing_weights_ptr[scatter_idx];
-                const float* src_row = expert_intermediate2 + (int64_t)src_row_idx * hidden_dim;
-                for (int j = 0; j < (int)hidden_dim; ++j) acc[j] += w * src_row[j];
+
+                // all-reduce(sum) across tp ranks for this expert-token row
+                for (int tp_rank = 0; tp_rank < (int)tp_size; ++tp_rank) {
+                    const float* src_row = expert_out_tp +
+                        ((int64_t)tp_rank * total_expert_tokens + src_row_idx) * hidden_dim;
+                    for (int j = 0; j < (int)hidden_dim; ++j) {
+                        acc[j] += w * src_row[j];
+                    }
+                }
             }
 
             T* dst = y_out_ptr + t * hidden_dim;
@@ -639,7 +662,7 @@ void moe_q8_forward_ptr_impl(
 
     std::free(x_qs);
     std::free(x_d);
-    std::free(expert_intermediate2);
+    std::free(expert_out_tp);
 }
 
 template void moe_q8_forward_ptr_impl<at::Half>(
@@ -647,11 +670,11 @@ template void moe_q8_forward_ptr_impl<at::Half>(
     const float*, const int32_t*,
     const int8_t*, const at::Half*,
     const int8_t*, const at::Half*,
-    int64_t,int64_t,int64_t,int64_t,int64_t);
+    int64_t,int64_t,int64_t,int64_t,int64_t,int64_t);
 
 template void moe_q8_forward_ptr_impl<at::BFloat16>(
     const at::BFloat16*, at::BFloat16*,
     const float*, const int32_t*,
     const int8_t*, const at::Half*,
     const int8_t*, const at::Half*,
-    int64_t,int64_t,int64_t,int64_t,int64_t);
+    int64_t,int64_t,int64_t,int64_t,int64_t,int64_t);

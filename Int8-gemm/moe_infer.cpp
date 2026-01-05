@@ -1,8 +1,8 @@
 #include "moe_infer.h"
 #include "q8_gemm.h"
-
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 static inline void* aligned_alloc64(size_t bytes) {
     void* p = std::aligned_alloc(64, ((bytes + 63) / 64) * 64);
@@ -10,20 +10,31 @@ static inline void* aligned_alloc64(size_t bytes) {
     return p;
 }
 
-MoEInfer::MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediate_size)
-    : num_experts_(num_experts), hidden_size_(hidden_size), intermediate_size_(intermediate_size) {
-    // numa_nodes forced to 1
+MoEInfer::MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediate_size, int64_t tp_size)
+    : num_experts_(num_experts),
+      hidden_size_(hidden_size),
+      intermediate_size_(intermediate_size),
+      tp_size_(tp_size) {
+
+    TORCH_CHECK(tp_size_ >= 1, "tp_size must be >= 1");
     TORCH_CHECK(hidden_size_ % 32 == 0, "hidden_size must be multiple of 32");
-    TORCH_CHECK(intermediate_size_ % 32 == 0, "intermediate_size must be multiple of 32");
+    TORCH_CHECK(intermediate_size_ % tp_size_ == 0, "intermediate_size must be divisible by tp_size");
+    intermediate_shard_ = intermediate_size_ / tp_size_;
+    TORCH_CHECK(intermediate_shard_ % 32 == 0, "intermediate_size/tp_size must be multiple of 32");
 
-    const int64_t gate_up_qs_bytes = num_experts_ * (2 * intermediate_size_) * hidden_size_ * sizeof(int8_t);
-    const int64_t gate_up_d_bytes  = num_experts_ * (2 * intermediate_size_) * (hidden_size_ / 32) * sizeof(at::Half);
+    // New packed sizes: [E, TP, ...]
+    const int64_t gate_up_qs_bytes =
+        num_experts_ * tp_size_ * (2 * intermediate_shard_) * hidden_size_ * sizeof(int8_t);
+    const int64_t gate_up_d_bytes  =
+        num_experts_ * tp_size_ * (2 * intermediate_shard_) * (hidden_size_ / 32) * sizeof(at::Half);
 
-    const int64_t down_qs_bytes = num_experts_ * hidden_size_ * intermediate_size_ * sizeof(int8_t);
-    const int64_t down_d_bytes  = num_experts_ * hidden_size_ * (intermediate_size_ / 32) * sizeof(at::Half);
+    const int64_t down_qs_bytes =
+        num_experts_ * tp_size_ * hidden_size_ * intermediate_shard_ * sizeof(int8_t);
+    const int64_t down_d_bytes  =
+        num_experts_ * tp_size_ * hidden_size_ * (intermediate_shard_ / 32) * sizeof(at::Half);
 
-    gate_up_qs_packed_ = (int8_t*)aligned_alloc64(gate_up_qs_bytes);
-    gate_up_d_packed_  = (at::Half*)aligned_alloc64(gate_up_d_bytes);
+    gate_up_qs_packed_   = (int8_t*)aligned_alloc64(gate_up_qs_bytes);
+    gate_up_d_packed_    = (at::Half*)aligned_alloc64(gate_up_d_bytes);
     down_proj_qs_packed_ = (int8_t*)aligned_alloc64(down_qs_bytes);
     down_proj_d_packed_  = (at::Half*)aligned_alloc64(down_d_bytes);
 
@@ -49,50 +60,91 @@ void MoEInfer::store_quantized_weights_repack(
     TORCH_CHECK(gate_up_qs.is_contiguous() && gate_up_d.is_contiguous(), "gate_up must be contiguous");
     TORCH_CHECK(down_proj_qs.is_contiguous() && down_proj_d.is_contiguous(), "down_proj must be contiguous");
 
-    // Expect row-major:
-    // gate_up_qs: [E, 2*I, H] int8
-    // gate_up_d:  [E, 2*I, H/32] half
-    // down_qs:    [E, H, I] int8
-    // down_d:     [E, H, I/32] half
     TORCH_CHECK(gate_up_qs.scalar_type() == torch::kInt8, "gate_up_qs must be int8");
     TORCH_CHECK(gate_up_d.scalar_type() == torch::kFloat16, "gate_up_d must be float16");
     TORCH_CHECK(down_proj_qs.scalar_type() == torch::kInt8, "down_proj_qs must be int8");
     TORCH_CHECK(down_proj_d.scalar_type() == torch::kFloat16, "down_proj_d must be float16");
 
-    const int8_t* src_gate_up_qs = gate_up_qs.data_ptr<int8_t>();
+    // Expected shapes (full, before TP):
+    // gate_up_qs: [E, 2*I, H]
+    // gate_up_d : [E, 2*I, H/32]
+    // down_qs   : [E, H, I]
+    // down_d    : [E, H, I/32]
+    TORCH_CHECK(gate_up_qs.dim() == 3, "gate_up_qs must be [E,2I,H]");
+    TORCH_CHECK(down_proj_qs.dim() == 3, "down_proj_qs must be [E,H,I]");
+
+    const int64_t E = gate_up_qs.size(0);
+    TORCH_CHECK(E == num_experts_, "E mismatch");
+
+    const int64_t I = intermediate_size_;
+    const int64_t Ish = intermediate_shard_;
+    const int64_t H = hidden_size_;
+    const int64_t H_BLK = H / 32;
+    const int64_t Ish_BLK = Ish / 32;
+    const int64_t I_BLK = I / 32;
+
+    const int8_t*  src_gate_up_qs = gate_up_qs.data_ptr<int8_t>();
     const at::Half* src_gate_up_d = (const at::Half*)gate_up_d.data_ptr<at::Half>();
-    const int8_t* src_down_qs = down_proj_qs.data_ptr<int8_t>();
+    const int8_t*  src_down_qs = down_proj_qs.data_ptr<int8_t>();
     const at::Half* src_down_d = (const at::Half*)down_proj_d.data_ptr<at::Half>();
 
+    // gate_up: shard on N (rows): [2I, H] -> tp blocks of [2Ish, H]
     for (int64_t exp = 0; exp < num_experts_; ++exp) {
-        // repack gate_up for this expert: N = 2I, K = H
-        {
-            const int64_t N = 2 * intermediate_size_;
-            const int64_t K = hidden_size_;
-            const int64_t K_BLOCKS = K / 32;
+        for (int64_t tp = 0; tp < tp_size_; ++tp) {
+            const int64_t shard_idx = exp * tp_size_ + tp;
 
-            const int8_t* expert_src_qs = src_gate_up_qs + exp * (N * K);
-            const at::Half* expert_src_d = src_gate_up_d + exp * (N * K_BLOCKS);
+            const int64_t Nsh = 2 * Ish;
+            const int64_t K   = H;
 
-            int8_t* expert_dst_qs = gate_up_qs_packed_ + exp * (N * K);
-            at::Half* expert_dst_d = gate_up_d_packed_ + exp * (N * K_BLOCKS);
+            const int64_t src_base_qs = exp * (2 * I * H) + tp * (Nsh * H);
+            const int64_t src_base_d  = exp * (2 * I * H_BLK) + tp * (Nsh * H_BLK);
 
-            repack_B_q8_0_from_ptr<at::Half>(N, K, expert_src_qs, expert_src_d, expert_dst_qs, expert_dst_d);
+            int8_t*   dst_qs = gate_up_qs_packed_ + shard_idx * (Nsh * K);
+            at::Half* dst_d  = gate_up_d_packed_  + shard_idx * (Nsh * H_BLK);
+
+            repack_B_q8_0_from_ptr<at::Half>(
+                Nsh, K,
+                src_gate_up_qs + src_base_qs,
+                src_gate_up_d  + src_base_d,
+                dst_qs, dst_d
+            );
         }
+    }
 
-        // repack down_proj for this expert: N = H, K = I
-        {
-            const int64_t N = hidden_size_;
-            const int64_t K = intermediate_size_;
-            const int64_t K_BLOCKS = K / 32;
+    // down_proj: shard on K (cols): [H, I] -> tp blocks of [H, Ish]
+    // Need per-row slice copy to make [H, Ish] contiguous.
+    std::vector<int8_t> tmp_qs((size_t)H * Ish);
+    std::vector<at::Half> tmp_d((size_t)H * Ish_BLK);
 
-            const int8_t* expert_src_qs = src_down_qs + exp * (N * K);
-            const at::Half* expert_src_d = src_down_d + exp * (N * K_BLOCKS);
+    for (int64_t exp = 0; exp < num_experts_; ++exp) {
+        for (int64_t tp = 0; tp < tp_size_; ++tp) {
+            const int64_t shard_idx = exp * tp_size_ + tp;
 
-            int8_t* expert_dst_qs = down_proj_qs_packed_ + exp * (N * K);
-            at::Half* expert_dst_d = down_proj_d_packed_ + exp * (N * K_BLOCKS);
+            // Build tmp [H, Ish]
+            for (int64_t row = 0; row < H; ++row) {
+                const int64_t src_row_qs_off = exp * (H * I) + row * I + tp * Ish;
+                std::memcpy(
+                    tmp_qs.data() + row * Ish,
+                    src_down_qs + src_row_qs_off,
+                    (size_t)Ish * sizeof(int8_t)
+                );
 
-            repack_B_q8_0_from_ptr<at::Half>(N, K, expert_src_qs, expert_src_d, expert_dst_qs, expert_dst_d);
+                const int64_t src_row_d_off = exp * (H * I_BLK) + row * I_BLK + tp * Ish_BLK;
+                std::memcpy(
+                    tmp_d.data() + row * Ish_BLK,
+                    src_down_d + src_row_d_off,
+                    (size_t)Ish_BLK * sizeof(at::Half)
+                );
+            }
+
+            int8_t*   dst_qs = down_proj_qs_packed_ + shard_idx * (H * Ish);
+            at::Half* dst_d  = down_proj_d_packed_  + shard_idx * (H * Ish_BLK);
+
+            repack_B_q8_0_from_ptr<at::Half>(
+                /*N=*/H, /*K=*/Ish,
+                tmp_qs.data(), tmp_d.data(),
+                dst_qs, dst_d
+            );
         }
     }
 }
@@ -104,46 +156,84 @@ void MoEInfer::quantize_and_store_expert(
     TORCH_CHECK(weight_fp32_cpu.is_contiguous(), "weight must be contiguous");
     TORCH_CHECK(weight_fp32_cpu.scalar_type() == torch::kFloat32, "weight must be float32");
 
-    std::vector<torch::Tensor> q = quantize_weight_only(weight_fp32_cpu);
-    torch::Tensor& qs = q[0]; // [N,K] int8
-    torch::Tensor& d  = q[1]; // [N,K/32] half
+    const int64_t I = intermediate_size_;
+    const int64_t Ish = intermediate_shard_;
+    const int64_t H = hidden_size_;
+    const int64_t H_BLK = H / 32;
+    const int64_t Ish_BLK = Ish / 32;
+    const int64_t I_BLK = I / 32;
 
-    const int8_t* qs_ptr = qs.data_ptr<int8_t>();
+    std::vector<torch::Tensor> q = quantize_weight_only(weight_fp32_cpu);
+    torch::Tensor& qs = q[0];
+    torch::Tensor& d  = q[1];
+
+    const int8_t*  qs_ptr = qs.data_ptr<int8_t>();
     const at::Half* d_ptr = (const at::Half*)d.data_ptr<at::Half>();
 
     if (proj_name == "gate_proj" || proj_name == "up_proj") {
-        const int64_t N = intermediate_size_;
-        const int64_t K = hidden_size_;
-        const int64_t K_BLOCKS = K / 32;
+        // weight is [I, H] in float (common for MLP)
+        TORCH_CHECK(qs.size(0) == I && qs.size(1) == H, "gate/up weight must be [I,H]");
 
-        // gate_up layout in buffer: [E, 2N, K]
-        int64_t base_qs_off = expert_idx * (2 * N * K);
-        int64_t base_d_off  = expert_idx * (2 * N * K_BLOCKS);
+        // for each tp shard: rows [tp*Ish : (tp+1)*Ish]
+        for (int64_t tp = 0; tp < tp_size_; ++tp) {
+            const int64_t shard_idx = expert_idx * tp_size_ + tp;
 
-        if (proj_name == "up_proj") {
-            base_qs_off += (N * K);
-            base_d_off  += (N * K_BLOCKS);
+            const int64_t N = Ish;
+            const int64_t K = H;
+
+            const int64_t src_base_qs = tp * (Ish * H);
+            const int64_t src_base_d  = tp * (Ish * H_BLK);
+
+            // packed gate_up shard is [2*Ish, H], where:
+            // first Ish rows = gate, next Ish rows = up
+            const int64_t row_off = (proj_name == "up_proj") ? Ish : 0;
+
+            int8_t* dst_qs = gate_up_qs_packed_ + shard_idx * (2 * Ish * H) + row_off * H;
+            at::Half* dst_d = gate_up_d_packed_ + shard_idx * (2 * Ish * H_BLK) + row_off * H_BLK;
+
+            repack_B_q8_0_from_ptr<at::Half>(
+                N, K,
+                qs_ptr + src_base_qs,
+                d_ptr  + src_base_d,
+                dst_qs, dst_d
+            );
         }
-
-        int8_t* dst_qs = gate_up_qs_packed_ + base_qs_off;
-        at::Half* dst_d = gate_up_d_packed_ + base_d_off;
-
-        repack_B_q8_0_from_ptr<at::Half>(N, K, qs_ptr, d_ptr, dst_qs, dst_d);
         return;
     }
 
     if (proj_name == "down_proj") {
-        const int64_t N = hidden_size_;
-        const int64_t K = intermediate_size_;
-        const int64_t K_BLOCKS = K / 32;
+        // weight [H, I]
+        TORCH_CHECK(qs.size(0) == H && qs.size(1) == I, "down weight must be [H,I]");
 
-        int64_t base_qs_off = expert_idx * (N * K);
-        int64_t base_d_off  = expert_idx * (N * K_BLOCKS);
+        // column-shard on K: build tmp [H, Ish]
+        std::vector<int8_t> tmp_qs((size_t)H * Ish);
+        std::vector<at::Half> tmp_d((size_t)H * Ish_BLK);
 
-        int8_t* dst_qs = down_proj_qs_packed_ + base_qs_off;
-        at::Half* dst_d = down_proj_d_packed_ + base_d_off;
+        for (int64_t tp = 0; tp < tp_size_; ++tp) {
+            const int64_t shard_idx = expert_idx * tp_size_ + tp;
 
-        repack_B_q8_0_from_ptr<at::Half>(N, K, qs_ptr, d_ptr, dst_qs, dst_d);
+            for (int64_t row = 0; row < H; ++row) {
+                std::memcpy(
+                    tmp_qs.data() + row * Ish,
+                    qs_ptr + row * I + tp * Ish,
+                    (size_t)Ish * sizeof(int8_t)
+                );
+                std::memcpy(
+                    tmp_d.data() + row * Ish_BLK,
+                    d_ptr + row * I_BLK + tp * Ish_BLK,
+                    (size_t)Ish_BLK * sizeof(at::Half)
+                );
+            }
+
+            int8_t* dst_qs = down_proj_qs_packed_ + shard_idx * (H * Ish);
+            at::Half* dst_d = down_proj_d_packed_ + shard_idx * (H * Ish_BLK);
+
+            repack_B_q8_0_from_ptr<at::Half>(
+                H, Ish,
+                tmp_qs.data(), tmp_d.data(),
+                dst_qs, dst_d
+            );
+        }
         return;
     }
 
@@ -177,6 +267,7 @@ void MoEInfer::execute_on_cpu_routed_from_pointers(
                 hidden_size_,
                 num_experts_,
                 intermediate_size_,
+                tp_size_,          // NEW
                 top_k
             );
         }
