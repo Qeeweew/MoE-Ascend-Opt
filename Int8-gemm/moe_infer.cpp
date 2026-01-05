@@ -1,20 +1,25 @@
 #include "moe_infer.h"
 #include "q8_gemm.h"
+#include "numa_threadpool.h"
+
 #include <cstring>
 #include <stdexcept>
 #include <vector>
+#include <numa.h>
 
-static inline void* aligned_alloc64(size_t bytes) {
-    void* p = std::aligned_alloc(64, ((bytes + 63) / 64) * 64);
-    if (!p) throw std::runtime_error("aligned_alloc failed");
+static inline void* numa_alloc_or_throw(size_t bytes, int node) {
+    void* p = numa_alloc_onnode(bytes, node);
+    if (!p) throw std::runtime_error("numa_alloc_onnode failed");
+    std::memset(p, 0, bytes);
     return p;
 }
 
-MoEInfer::MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediate_size, int64_t tp_size)
+MoEInfer::MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediate_size)
     : num_experts_(num_experts),
       hidden_size_(hidden_size),
-      intermediate_size_(intermediate_size),
-      tp_size_(tp_size) {
+      intermediate_size_(intermediate_size) {
+
+    tp_size_ = nanovllm::detail::read_env_int64("NANOVLLM_TP_SIZE", 2);
 
     TORCH_CHECK(tp_size_ >= 1, "tp_size must be >= 1");
     TORCH_CHECK(hidden_size_ % 32 == 0, "hidden_size must be multiple of 32");
@@ -22,33 +27,48 @@ MoEInfer::MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediat
     intermediate_shard_ = intermediate_size_ / tp_size_;
     TORCH_CHECK(intermediate_shard_ % 32 == 0, "intermediate_size/tp_size must be multiple of 32");
 
-    // New packed sizes: [E, TP, ...]
-    const int64_t gate_up_qs_bytes =
-        num_experts_ * tp_size_ * (2 * intermediate_shard_) * hidden_size_ * sizeof(int8_t);
-    const int64_t gate_up_d_bytes  =
-        num_experts_ * tp_size_ * (2 * intermediate_shard_) * (hidden_size_ / 32) * sizeof(at::Half);
+    TORCH_CHECK(numa_available() != -1, "libnuma not available on this system");
+    int max_node = numa_max_node();
+    TORCH_CHECK(tp_size_ - 1 <= max_node,
+                "tp_size=", tp_size_, " exceeds max NUMA node=", max_node);
 
-    const int64_t down_qs_bytes =
-        num_experts_ * tp_size_ * hidden_size_ * intermediate_shard_ * sizeof(int8_t);
-    const int64_t down_d_bytes  =
-        num_experts_ * tp_size_ * hidden_size_ * (intermediate_shard_ / 32) * sizeof(at::Half);
+    // bytes per tp (tp-local buffers contain all experts for that tp)
+    const int64_t H = hidden_size_;
+    const int64_t Ish = intermediate_shard_;
+    const int64_t H_BLK = H / 32;
+    const int64_t Ish_BLK = Ish / 32;
 
-    gate_up_qs_packed_   = (int8_t*)aligned_alloc64(gate_up_qs_bytes);
-    gate_up_d_packed_    = (at::Half*)aligned_alloc64(gate_up_d_bytes);
-    down_proj_qs_packed_ = (int8_t*)aligned_alloc64(down_qs_bytes);
-    down_proj_d_packed_  = (at::Half*)aligned_alloc64(down_d_bytes);
+    gate_up_qs_bytes_per_tp_ =
+        (size_t)num_experts_ * (size_t)(2 * Ish) * (size_t)H * sizeof(int8_t);
+    gate_up_d_bytes_per_tp_  =
+        (size_t)num_experts_ * (size_t)(2 * Ish) * (size_t)H_BLK * sizeof(at::Half);
 
-    std::memset(gate_up_qs_packed_, 0, gate_up_qs_bytes);
-    std::memset(gate_up_d_packed_,  0, gate_up_d_bytes);
-    std::memset(down_proj_qs_packed_, 0, down_qs_bytes);
-    std::memset(down_proj_d_packed_,  0, down_d_bytes);
+    down_qs_bytes_per_tp_ =
+        (size_t)num_experts_ * (size_t)H * (size_t)Ish * sizeof(int8_t);
+    down_d_bytes_per_tp_  =
+        (size_t)num_experts_ * (size_t)H * (size_t)Ish_BLK * sizeof(at::Half);
+
+    gate_up_qs_tp_.resize((size_t)tp_size_, nullptr);
+    gate_up_d_tp_.resize((size_t)tp_size_, nullptr);
+    down_proj_qs_tp_.resize((size_t)tp_size_, nullptr);
+    down_proj_d_tp_.resize((size_t)tp_size_, nullptr);
+
+    for (int tp = 0; tp < (int)tp_size_; ++tp) {
+        int node = tp;
+        gate_up_qs_tp_[(size_t)tp]   = (int8_t*)numa_alloc_or_throw(gate_up_qs_bytes_per_tp_, node);
+        gate_up_d_tp_[(size_t)tp]    = (at::Half*)numa_alloc_or_throw(gate_up_d_bytes_per_tp_, node);
+        down_proj_qs_tp_[(size_t)tp] = (int8_t*)numa_alloc_or_throw(down_qs_bytes_per_tp_, node);
+        down_proj_d_tp_[(size_t)tp]  = (at::Half*)numa_alloc_or_throw(down_d_bytes_per_tp_, node);
+    }
 }
 
 MoEInfer::~MoEInfer() {
-    std::free(gate_up_qs_packed_);
-    std::free(gate_up_d_packed_);
-    std::free(down_proj_qs_packed_);
-    std::free(down_proj_d_packed_);
+    for (int tp = 0; tp < (int)tp_size_; ++tp) {
+        if (gate_up_qs_tp_[(size_t)tp])   { numa_free(gate_up_qs_tp_[(size_t)tp], gate_up_qs_bytes_per_tp_); gate_up_qs_tp_[(size_t)tp] = nullptr; }
+        if (gate_up_d_tp_[(size_t)tp])    { numa_free(gate_up_d_tp_[(size_t)tp], gate_up_d_bytes_per_tp_); gate_up_d_tp_[(size_t)tp] = nullptr; }
+        if (down_proj_qs_tp_[(size_t)tp]) { numa_free(down_proj_qs_tp_[(size_t)tp], down_qs_bytes_per_tp_); down_proj_qs_tp_[(size_t)tp] = nullptr; }
+        if (down_proj_d_tp_[(size_t)tp])  { numa_free(down_proj_d_tp_[(size_t)tp], down_d_bytes_per_tp_); down_proj_d_tp_[(size_t)tp] = nullptr; }
+    }
 }
 
 void MoEInfer::store_quantized_weights_repack(
@@ -65,11 +85,6 @@ void MoEInfer::store_quantized_weights_repack(
     TORCH_CHECK(down_proj_qs.scalar_type() == torch::kInt8, "down_proj_qs must be int8");
     TORCH_CHECK(down_proj_d.scalar_type() == torch::kFloat16, "down_proj_d must be float16");
 
-    // Expected shapes (full, before TP):
-    // gate_up_qs: [E, 2*I, H]
-    // gate_up_d : [E, 2*I, H/32]
-    // down_qs   : [E, H, I]
-    // down_d    : [E, H, I/32]
     TORCH_CHECK(gate_up_qs.dim() == 3, "gate_up_qs must be [E,2I,H]");
     TORCH_CHECK(down_proj_qs.dim() == 3, "down_proj_qs must be [E,H,I]");
 
@@ -83,24 +98,22 @@ void MoEInfer::store_quantized_weights_repack(
     const int64_t Ish_BLK = Ish / 32;
     const int64_t I_BLK = I / 32;
 
-    const int8_t*  src_gate_up_qs = gate_up_qs.data_ptr<int8_t>();
-    const at::Half* src_gate_up_d = (const at::Half*)gate_up_d.data_ptr<at::Half>();
-    const int8_t*  src_down_qs = down_proj_qs.data_ptr<int8_t>();
-    const at::Half* src_down_d = (const at::Half*)down_proj_d.data_ptr<at::Half>();
+    const int8_t*   src_gate_up_qs = gate_up_qs.data_ptr<int8_t>();
+    const at::Half* src_gate_up_d  = (const at::Half*)gate_up_d.data_ptr<at::Half>();
+    const int8_t*   src_down_qs     = down_proj_qs.data_ptr<int8_t>();
+    const at::Half* src_down_d      = (const at::Half*)down_proj_d.data_ptr<at::Half>();
 
-    // gate_up: shard on N (rows): [2I, H] -> tp blocks of [2Ish, H]
+    // gate_up: shard on N (rows): [2I, H] -> tp blocks [2Ish, H]
     for (int64_t exp = 0; exp < num_experts_; ++exp) {
         for (int64_t tp = 0; tp < tp_size_; ++tp) {
-            const int64_t shard_idx = exp * tp_size_ + tp;
-
             const int64_t Nsh = 2 * Ish;
             const int64_t K   = H;
 
             const int64_t src_base_qs = exp * (2 * I * H) + tp * (Nsh * H);
             const int64_t src_base_d  = exp * (2 * I * H_BLK) + tp * (Nsh * H_BLK);
 
-            int8_t*   dst_qs = gate_up_qs_packed_ + shard_idx * (Nsh * K);
-            at::Half* dst_d  = gate_up_d_packed_  + shard_idx * (Nsh * H_BLK);
+            int8_t*   dst_qs = gate_up_qs_tp_[(size_t)tp] + exp * (Nsh * K);
+            at::Half* dst_d  = gate_up_d_tp_[(size_t)tp]  + exp * (Nsh * H_BLK);
 
             repack_B_q8_0_from_ptr<at::Half>(
                 Nsh, K,
@@ -111,34 +124,27 @@ void MoEInfer::store_quantized_weights_repack(
         }
     }
 
-    // down_proj: shard on K (cols): [H, I] -> tp blocks of [H, Ish]
-    // Need per-row slice copy to make [H, Ish] contiguous.
-    std::vector<int8_t> tmp_qs((size_t)H * Ish);
-    std::vector<at::Half> tmp_d((size_t)H * Ish_BLK);
+    // down_proj: shard on K (cols): [H, I] -> tp blocks [H, Ish]
+    std::vector<int8_t>   tmp_qs((size_t)H * (size_t)Ish);
+    std::vector<at::Half> tmp_d ((size_t)H * (size_t)Ish_BLK);
 
     for (int64_t exp = 0; exp < num_experts_; ++exp) {
         for (int64_t tp = 0; tp < tp_size_; ++tp) {
-            const int64_t shard_idx = exp * tp_size_ + tp;
 
-            // Build tmp [H, Ish]
             for (int64_t row = 0; row < H; ++row) {
                 const int64_t src_row_qs_off = exp * (H * I) + row * I + tp * Ish;
-                std::memcpy(
-                    tmp_qs.data() + row * Ish,
-                    src_down_qs + src_row_qs_off,
-                    (size_t)Ish * sizeof(int8_t)
-                );
+                std::memcpy(tmp_qs.data() + row * Ish,
+                            src_down_qs + src_row_qs_off,
+                            (size_t)Ish * sizeof(int8_t));
 
                 const int64_t src_row_d_off = exp * (H * I_BLK) + row * I_BLK + tp * Ish_BLK;
-                std::memcpy(
-                    tmp_d.data() + row * Ish_BLK,
-                    src_down_d + src_row_d_off,
-                    (size_t)Ish_BLK * sizeof(at::Half)
-                );
+                std::memcpy(tmp_d.data() + row * Ish_BLK,
+                            src_down_d + src_row_d_off,
+                            (size_t)Ish_BLK * sizeof(at::Half));
             }
 
-            int8_t*   dst_qs = down_proj_qs_packed_ + shard_idx * (H * Ish);
-            at::Half* dst_d  = down_proj_d_packed_  + shard_idx * (H * Ish_BLK);
+            int8_t*   dst_qs = down_proj_qs_tp_[(size_t)tp] + exp * (H * Ish);
+            at::Half* dst_d  = down_proj_d_tp_[(size_t)tp]  + exp * (H * Ish_BLK);
 
             repack_B_q8_0_from_ptr<at::Half>(
                 /*N=*/H, /*K=*/Ish,
@@ -167,29 +173,24 @@ void MoEInfer::quantize_and_store_expert(
     torch::Tensor& qs = q[0];
     torch::Tensor& d  = q[1];
 
-    const int8_t*  qs_ptr = qs.data_ptr<int8_t>();
-    const at::Half* d_ptr = (const at::Half*)d.data_ptr<at::Half>();
+    const int8_t*   qs_ptr = qs.data_ptr<int8_t>();
+    const at::Half* d_ptr  = (const at::Half*)d.data_ptr<at::Half>();
 
     if (proj_name == "gate_proj" || proj_name == "up_proj") {
-        // weight is [I, H] in float (common for MLP)
         TORCH_CHECK(qs.size(0) == I && qs.size(1) == H, "gate/up weight must be [I,H]");
 
-        // for each tp shard: rows [tp*Ish : (tp+1)*Ish]
         for (int64_t tp = 0; tp < tp_size_; ++tp) {
-            const int64_t shard_idx = expert_idx * tp_size_ + tp;
-
             const int64_t N = Ish;
             const int64_t K = H;
 
             const int64_t src_base_qs = tp * (Ish * H);
             const int64_t src_base_d  = tp * (Ish * H_BLK);
 
-            // packed gate_up shard is [2*Ish, H], where:
-            // first Ish rows = gate, next Ish rows = up
             const int64_t row_off = (proj_name == "up_proj") ? Ish : 0;
 
-            int8_t* dst_qs = gate_up_qs_packed_ + shard_idx * (2 * Ish * H) + row_off * H;
-            at::Half* dst_d = gate_up_d_packed_ + shard_idx * (2 * Ish * H_BLK) + row_off * H_BLK;
+            // per-tp buffer, per-expert offset
+            int8_t*   dst_qs = gate_up_qs_tp_[(size_t)tp] + expert_idx * (2 * Ish * H) + row_off * H;
+            at::Half* dst_d  = gate_up_d_tp_[(size_t)tp]  + expert_idx * (2 * Ish * H_BLK) + row_off * H_BLK;
 
             repack_B_q8_0_from_ptr<at::Half>(
                 N, K,
@@ -202,31 +203,24 @@ void MoEInfer::quantize_and_store_expert(
     }
 
     if (proj_name == "down_proj") {
-        // weight [H, I]
         TORCH_CHECK(qs.size(0) == H && qs.size(1) == I, "down weight must be [H,I]");
 
-        // column-shard on K: build tmp [H, Ish]
-        std::vector<int8_t> tmp_qs((size_t)H * Ish);
-        std::vector<at::Half> tmp_d((size_t)H * Ish_BLK);
+        std::vector<int8_t>   tmp_qs((size_t)H * (size_t)Ish);
+        std::vector<at::Half> tmp_d ((size_t)H * (size_t)Ish_BLK);
 
         for (int64_t tp = 0; tp < tp_size_; ++tp) {
-            const int64_t shard_idx = expert_idx * tp_size_ + tp;
-
             for (int64_t row = 0; row < H; ++row) {
-                std::memcpy(
-                    tmp_qs.data() + row * Ish,
-                    qs_ptr + row * I + tp * Ish,
-                    (size_t)Ish * sizeof(int8_t)
-                );
-                std::memcpy(
-                    tmp_d.data() + row * Ish_BLK,
-                    d_ptr + row * I_BLK + tp * Ish_BLK,
-                    (size_t)Ish_BLK * sizeof(at::Half)
-                );
+                std::memcpy(tmp_qs.data() + row * Ish,
+                            qs_ptr + row * I + tp * Ish,
+                            (size_t)Ish * sizeof(int8_t));
+
+                std::memcpy(tmp_d.data() + row * Ish_BLK,
+                            d_ptr + row * I_BLK + tp * Ish_BLK,
+                            (size_t)Ish_BLK * sizeof(at::Half));
             }
 
-            int8_t* dst_qs = down_proj_qs_packed_ + shard_idx * (H * Ish);
-            at::Half* dst_d = down_proj_d_packed_ + shard_idx * (H * Ish_BLK);
+            int8_t*   dst_qs = down_proj_qs_tp_[(size_t)tp] + expert_idx * (H * Ish);
+            at::Half* dst_d  = down_proj_d_tp_[(size_t)tp]  + expert_idx * (H * Ish_BLK);
 
             repack_B_q8_0_from_ptr<at::Half>(
                 H, Ish,
@@ -259,15 +253,15 @@ void MoEInfer::execute_on_cpu_routed_from_pointers(
                 (scalar_t*)y_out_ptr,
                 topk_weights_ptr,
                 topk_ids_ptr,
-                gate_up_qs_packed_,
-                gate_up_d_packed_,
-                down_proj_qs_packed_,
-                down_proj_d_packed_,
+                gate_up_qs_tp_.data(),
+                gate_up_d_tp_.data(),
+                down_proj_qs_tp_.data(),
+                down_proj_d_tp_.data(),
                 num_tokens,
                 hidden_size_,
                 num_experts_,
                 intermediate_size_,
-                tp_size_,          // NEW
+                tp_size_,
                 top_k
             );
         }

@@ -2,10 +2,11 @@
 #include <torch/extension.h>
 #include <cstdint>
 #include <string>
+#include "numa_threadpool.h"
 
 class MoEInfer {
 public:
-    MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediate_size, int64_t tp_size = 2);
+    MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediate_size);
     ~MoEInfer();
 
     MoEInfer(const MoEInfer&) = delete;
@@ -44,8 +45,17 @@ private:
     int64_t tp_size_;
     int64_t intermediate_shard_;
 
-    int8_t*   gate_up_qs_packed_ = nullptr;
-    at::Half* gate_up_d_packed_  = nullptr;
-    int8_t*   down_proj_qs_packed_ = nullptr;
-    at::Half* down_proj_d_packed_  = nullptr;
+    // Weights placed per-tp NUMA node
+    // Layout per tp:
+    // gate_up: [E, 2*Ish, H]
+    // down:    [E, H, Ish]
+    std::vector<int8_t*>   gate_up_qs_tp_;
+    std::vector<at::Half*> gate_up_d_tp_;
+    std::vector<int8_t*>   down_proj_qs_tp_;
+    std::vector<at::Half*> down_proj_d_tp_;
+
+    size_t gate_up_qs_bytes_per_tp_ = 0;
+    size_t gate_up_d_bytes_per_tp_  = 0;
+    size_t down_qs_bytes_per_tp_    = 0;
+    size_t down_d_bytes_per_tp_     = 0;
 };
