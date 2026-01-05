@@ -26,5 +26,6 @@ void moe_q8_forward_ptr_impl(
     const at::Half* down_proj_d_packed, // packed scales
     int64_t num_tokens, int64_t hidden_dim, int64_t num_experts,
     int64_t intermediate_size,
+    int64_t tp_size,
     int64_t top_k
 );
