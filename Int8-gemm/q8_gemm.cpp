@@ -484,6 +484,100 @@ struct ThreadWorkspace {
 
 static thread_local ThreadWorkspace ws;
 
+// ------------------------- Global NUMA Memory Pool -------------------------
+struct NumaBufferPool {
+    size_t capacity_tokens = 0;
+    int64_t hidden_dim = 0;
+    int64_t tp_size = 0;
+    int64_t top_k = 0;
+
+    // Per-TP-rank buffers
+    std::vector<int8_t*> x_qs_ptrs;
+    std::vector<float*> x_d_ptrs;
+    std::vector<float*> expert_out_ptrs;
+    std::vector<float*> y_partial_ptrs;
+
+    void ensure_capacity(int64_t req_tokens, int64_t req_hidden, int64_t req_tp, int64_t req_topk) {
+        
+        // 检查配置是否改变或容量是否不足
+        bool shape_changed = (req_hidden != hidden_dim) || (req_tp != tp_size) || (req_topk != top_k);
+        bool size_grew = (req_tokens > (int64_t)capacity_tokens);
+
+        if (!shape_changed && !size_grew && !x_qs_ptrs.empty()) {
+            return;
+        }
+
+        // 如果配置改变或扩容，先释放旧内存
+        // (为了简单起见，这里选择全部释放重新分配。对于形状不变仅扩容的情况，也可以优化为realloc)
+        if (capacity_tokens > 0) {
+            free_buffers_unsafe();
+        }
+
+        if (shape_changed) {
+            hidden_dim = req_hidden;
+            tp_size = req_tp;
+            top_k = req_topk;
+        }
+
+        // 倍增策略计算新容量
+        size_t new_cap = (capacity_tokens == 0) ? (size_t)req_tokens : capacity_tokens;
+        if (size_grew || new_cap < (size_t)req_tokens) {
+            if (new_cap == 0) new_cap = 128; 
+            while (new_cap < (size_t)req_tokens) {
+                new_cap *= 2;
+            }
+            capacity_tokens = new_cap;
+        }
+
+        x_qs_ptrs.resize(tp_size);
+        x_d_ptrs.resize(tp_size);
+        expert_out_ptrs.resize(tp_size);
+        y_partial_ptrs.resize(tp_size);
+
+        // 计算各部分需要的字节数 (按最大容量计算)
+        const size_t x_qs_sz = capacity_tokens * hidden_dim * sizeof(int8_t);
+        const size_t x_d_sz  = capacity_tokens * (hidden_dim / QK8_0) * sizeof(float);
+        // expert_out 需容纳所有 tokens * top_k 的输出
+        const size_t out_sz  = capacity_tokens * top_k * hidden_dim * sizeof(float);
+        const size_t part_sz = capacity_tokens * hidden_dim * sizeof(float);
+
+        for (int i = 0; i < tp_size; ++i) {
+            x_qs_ptrs[i] = (int8_t*)numa_alloc_onnode(x_qs_sz, i);
+            x_d_ptrs[i]  = (float*) numa_alloc_onnode(x_d_sz, i);
+            expert_out_ptrs[i] = (float*)numa_alloc_onnode(out_sz, i);
+            y_partial_ptrs[i]  = (float*)numa_alloc_onnode(part_sz, i);
+
+            TORCH_CHECK(x_qs_ptrs[i] && x_d_ptrs[i] && expert_out_ptrs[i] && y_partial_ptrs[i], 
+                        "Numa allocation failed for node ", i);
+        }
+    }
+
+    void free_buffers_unsafe() {
+        if (capacity_tokens == 0) return;
+        const size_t x_qs_sz = capacity_tokens * hidden_dim * sizeof(int8_t);
+        const size_t x_d_sz  = capacity_tokens * (hidden_dim / QK8_0) * sizeof(float);
+        const size_t out_sz  = capacity_tokens * top_k * hidden_dim * sizeof(float);
+        const size_t part_sz = capacity_tokens * hidden_dim * sizeof(float);
+
+        for (size_t i = 0; i < x_qs_ptrs.size(); ++i) {
+            if (x_qs_ptrs[i]) numa_free(x_qs_ptrs[i], x_qs_sz);
+            if (x_d_ptrs[i])  numa_free(x_d_ptrs[i], x_d_sz);
+            if (expert_out_ptrs[i]) numa_free(expert_out_ptrs[i], out_sz);
+            if (y_partial_ptrs[i])  numa_free(y_partial_ptrs[i], part_sz);
+        }
+        x_qs_ptrs.clear();
+        x_d_ptrs.clear();
+        expert_out_ptrs.clear();
+        y_partial_ptrs.clear();
+    }
+
+    ~NumaBufferPool() {
+        free_buffers_unsafe();
+    }
+};
+
+static NumaBufferPool g_numa_pool;
+
 // ------------------------- MoE forward (routing already provided) -------------------------
 template <typename T>
 void moe_q8_forward_ptr_impl(
@@ -504,6 +598,15 @@ void moe_q8_forward_ptr_impl(
 {
     TORCH_CHECK(tp_size >= 1, "tp_size must be >= 1");
     TORCH_CHECK(numa_available() != -1, "libnuma not available");
+
+    // 1. Prepare Pool Memory
+    g_numa_pool.ensure_capacity(num_tokens, hidden_dim, tp_size, top_k);
+    
+    // Get pointers from pool (vectors of length tp_size)
+    const auto& pool_x_qs = g_numa_pool.x_qs_ptrs;
+    const auto& pool_x_d  = g_numa_pool.x_d_ptrs;
+    const auto& pool_expert_out = g_numa_pool.expert_out_ptrs;
+    const auto& pool_y_partial  = g_numa_pool.y_partial_ptrs;
 
     const int64_t intermediate_shard = intermediate_size / tp_size;
     const int64_t hidden_dim_k_blocks = hidden_dim / QK8_0;
@@ -545,51 +648,39 @@ void moe_q8_forward_ptr_impl(
         tasks_by_tp[(size_t)tasks[i].tp_rank].push_back(i);
     }
 
-    // Allocate x_qs/x_d (interleaved). No memset: every element will be written by quantization.
-    int8_t* x_qs = (int8_t*)numa_alloc_interleaved((size_t)num_tokens * (size_t)hidden_dim * sizeof(int8_t));
-    float*  x_d  = (float*) numa_alloc_interleaved((size_t)num_tokens * (size_t)hidden_dim_k_blocks * sizeof(float));
-    TORCH_CHECK(x_qs && x_d, "Failed to allocate x_qs/x_d");
-
-    // Per-TP expert outputs on each TP's node. No memset: GEMM writes full output (accumulate starts from zero inside kernel).
-    std::vector<float*> expert_out_tp((size_t)tp_size, nullptr);
-    const size_t out_bytes = (size_t)total_expert_tokens * (size_t)hidden_dim * sizeof(float);
-    for (int tp = 0; tp < (int)tp_size; ++tp) {
-        expert_out_tp[(size_t)tp] = (float*)numa_alloc_onnode(out_bytes, tp);
-        TORCH_CHECK(expert_out_tp[(size_t)tp], "Failed to allocate expert_out_tp on node");
-    }
-
-    // Per-TP partial y for Stage C (TP-local weighted sum). No memset: each token row is fully written.
-    std::vector<float*> y_partial_tp((size_t)tp_size, nullptr);
-    const size_t partial_bytes = (size_t)num_tokens * (size_t)hidden_dim * sizeof(float);
-    for (int tp = 0; tp < (int)tp_size; ++tp) {
-        y_partial_tp[(size_t)tp] = (float*)numa_alloc_onnode(partial_bytes, tp);
-        TORCH_CHECK(y_partial_tp[(size_t)tp], "Failed to allocate y_partial_tp on node");
-    }
-
-    // Prepare Node 0 executor for Stage A and final reduce
+    // Prepare Node 0 executor for final reduce
     auto exec0 = nanovllm::NumaExecutorManager::get(0);
 
     // ----------------------------------------------------------------
-    // Stage A: Quantize input (ONLY ON NODE 0)
+    // Stage A: Quantize input (Distributed on ALL NODES)
+    // 每个节点读取 x_in_ptr (remote read if not node 0) 并写入自己的 pool_x_qs[tp] (local write)
     // ----------------------------------------------------------------
     {
-        auto fut = exec0->launcher->submit([&, exec0]() {
-            exec0->pool->parallel_for(0, num_tokens, [&](int64_t i) {
-                ws.ensure_size(32, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
-                const T* src_row = x_in_ptr + i * hidden_dim;
+        std::vector<std::future<void>> futures;
+        futures.reserve((size_t)tp_size);
+        for (int tp = 0; tp < (int)tp_size; ++tp) {
+            auto exec = nanovllm::NumaExecutorManager::get(tp);
+            futures.emplace_back(exec->launcher->submit([&, tp, exec]() {
+                int8_t* local_x_qs = pool_x_qs[tp];
+                float*  local_x_d  = pool_x_d[tp];
 
-                for (int j = 0; j < (int)hidden_dim; ++j) ws.temp_row_buffer[j] = (float)src_row[j];
-
-                for (int k_block = 0; k_block < (int)hidden_dim_k_blocks; ++k_block) {
-                    quantize_block_q8_0(
-                        ws.temp_row_buffer + k_block * QK8_0,
-                        x_d + i * hidden_dim_k_blocks + k_block,
-                        x_qs + i * hidden_dim + k_block * QK8_0
-                    );
-                }
-            });
-        });
-        fut.get();
+                exec->pool->parallel_for(0, num_tokens, [&](int64_t i) {
+                    const T* src_row = x_in_ptr + i * hidden_dim;
+                    for (int k_block = 0; k_block < (int)hidden_dim_k_blocks; ++k_block) {
+                        float y_block[QK8_0];
+                        for (int j = 0; j < QK8_0; ++j) {
+                            y_block[j] = static_cast<float>(src_row[k_block * QK8_0 + j]);
+                        }
+                        quantize_block_q8_0(
+                            y_block,
+                            local_x_d + i * hidden_dim_k_blocks + k_block,
+                            local_x_qs + i * hidden_dim + k_block * QK8_0
+                        );
+                    }
+                });
+            }));
+        }
+        for (auto& f : futures) f.get();
     }
 
     // ----------------------------------------------------------------
@@ -613,8 +704,12 @@ void moe_q8_forward_ptr_impl(
         const int8_t* down_qs_ptr = down_proj_qs_tp[tp_rank] + (int64_t)exp_id * H * Ish;
         const at::Half* down_d_ptr = down_proj_d_tp[tp_rank]  + (int64_t)exp_id * H * Ish_BLK;
 
+        // Use node-local quantized input
+        const int8_t* current_x_qs = pool_x_qs[tp_rank];
+        const float*  current_x_d  = pool_x_d[tp_rank];
+
         pack_A_q8_0_from_quantized_indirect<ExecutionPolicy::Sequential>(
-            count, (int)hidden_dim, x_qs, x_d, token_map.data(), global_start_pos,
+            count, (int)hidden_dim, current_x_qs, current_x_d, token_map.data(), global_start_pos,
             ws.A_qs_packed1, ws.A_d_packed1
         );
 
@@ -633,7 +728,8 @@ void moe_q8_forward_ptr_impl(
             ws.A_qs_packed2, ws.A_d_packed2
         );
 
-        float* out = expert_out_tp[(size_t)tp_rank] + (int64_t)global_start_pos * (int64_t)hidden_dim;
+        // Write to node-local expert output buffer
+        float* out = pool_expert_out[tp_rank] + (int64_t)global_start_pos * (int64_t)hidden_dim;
 
         gemm_q8_0_compute_packed<ExecutionPolicy::Sequential>(
             count, (int)hidden_dim, (int)intermediate_shard,
@@ -660,7 +756,7 @@ void moe_q8_forward_ptr_impl(
     }
 
     // ----------------------------------------------------------------
-    // Stage C-1: TP-local Scatter + WeightedSum (each TP uses its own expert_out_tp)
+    // Stage C-1: TP-local Scatter + WeightedSum
     // ----------------------------------------------------------------
     {
         std::vector<std::future<void>> futures;
@@ -670,26 +766,22 @@ void moe_q8_forward_ptr_impl(
             auto exec = nanovllm::NumaExecutorManager::get(tp);
             futures.emplace_back(exec->launcher->submit([&, tp, exec]() {
                 exec->pool->parallel_for(0, num_tokens, [&](int64_t t) {
-                    ws.ensure_size(32, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
-                    float* acc = ws.temp_row_buffer;
-                    std::memset(acc, 0, (size_t)hidden_dim * sizeof(float)); // needed
-
+                    float* acc = pool_y_partial[tp] + t * hidden_dim;
+                    std::memset(acc, 0, (size_t)hidden_dim * sizeof(float));
                     for (int k = 0; k < (int)top_k; ++k) {
                         const int scatter_idx = (int)(t * top_k + k);
                         const int src_row_idx = scatter_map[scatter_idx];
                         if (src_row_idx == -1) continue;
 
                         const float w = routing_weights_ptr[scatter_idx];
+                        // Read from node-local expert output
                         const float* src_row =
-                            expert_out_tp[(size_t)tp] + (int64_t)src_row_idx * (int64_t)hidden_dim;
+                            pool_expert_out[tp] + (int64_t)src_row_idx * (int64_t)hidden_dim;
 
                         for (int j = 0; j < (int)hidden_dim; ++j) {
                             acc[j] += w * src_row[j];
                         }
                     }
-
-                    float* dst = y_partial_tp[(size_t)tp] + t * hidden_dim;
-                    std::memcpy(dst, acc, (size_t)hidden_dim * sizeof(float));
                 });
             }));
         }
@@ -698,17 +790,15 @@ void moe_q8_forward_ptr_impl(
     }
 
     // ----------------------------------------------------------------
-    // Stage C-2: Final Reduce on Node 0 (sum y_partial_tp across TP ranks)
+    // Stage C-2: Final Reduce on Node 0
     // ----------------------------------------------------------------
     {
         auto fut = exec0->launcher->submit([&, exec0]() {
             exec0->pool->parallel_for(0, num_tokens, [&](int64_t t) {
-                ws.ensure_size(32, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
-                float* acc = ws.temp_row_buffer;
-                std::memset(acc, 0, (size_t)hidden_dim * sizeof(float)); // needed
-
-                for (int tp = 0; tp < (int)tp_size; ++tp) {
-                    const float* src = y_partial_tp[(size_t)tp] + t * hidden_dim;
+                float* acc = pool_y_partial[0] + t * hidden_dim;
+                for (int tp = 1; tp < (int)tp_size; ++tp) {
+                    // Remote read from each node's partial result
+                    const float* src = pool_y_partial[tp] + t * hidden_dim;
                     for (int j = 0; j < (int)hidden_dim; ++j) acc[j] += src[j];
                 }
 
@@ -719,14 +809,6 @@ void moe_q8_forward_ptr_impl(
         fut.get();
     }
 
-    // free
-    numa_free(x_qs, (size_t)num_tokens * (size_t)hidden_dim * sizeof(int8_t));
-    numa_free(x_d,  (size_t)num_tokens * (size_t)hidden_dim_k_blocks * sizeof(float));
-
-    for (int tp = 0; tp < (int)tp_size; ++tp) {
-        numa_free(expert_out_tp[(size_t)tp], out_bytes);
-        numa_free(y_partial_tp[(size_t)tp], partial_bytes);
-    }
 }
 
 template void moe_q8_forward_ptr_impl<at::Half>(
