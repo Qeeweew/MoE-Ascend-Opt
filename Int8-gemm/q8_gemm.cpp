@@ -19,8 +19,8 @@
 using ggml_half = at::Half;
 
 #define QK8_0 32
-#define MR 8
-#define NR 4
+#define MR 4
+#define NR 8
 
 // ------------------------- q8 quant block (ARM NEON) -------------------------
 template<typename D_TYPE>
@@ -66,11 +66,20 @@ static void gemm_q8_0_microkernel_specialized(
     static_assert(MR_T > 0 && MR_T <= MR, "MR_T invalid");
     const int KC_BLOCKS = kc_size / QK8_0;
 
-    float32x4_t c_v[MR_T];
+    // c_v[row][0] covers columns 0-3
+    // c_v[row][1] covers columns 4-7
+    float32x4_t c_v[MR_T][2];
+
     if (accumulate) {
-        for (int i = 0; i < MR_T; ++i) c_v[i] = vld1q_f32(C + i * ldc);
+        for (int i = 0; i < MR_T; ++i) {
+            c_v[i][0] = vld1q_f32(C + i * ldc + 0);
+            c_v[i][1] = vld1q_f32(C + i * ldc + 4);
+        }
     } else {
-        for (int i = 0; i < MR_T; ++i) c_v[i] = vdupq_n_f32(0.0f);
+        for (int i = 0; i < MR_T; ++i) {
+            c_v[i][0] = vdupq_n_f32(0.0f);
+            c_v[i][1] = vdupq_n_f32(0.0f);
+        }
     }
 
     const int8_t* a_ptr = A_qs_packed;
@@ -79,55 +88,97 @@ static void gemm_q8_0_microkernel_specialized(
     const B_SCALE_TYPE* bd_ptr = B_d_packed;
 
     for (int k_block = 0; k_block < KC_BLOCKS; ++k_block) {
-        int32x4_t sum_v[MR];
-        for (int i = 0; i < MR_T; ++i) sum_v[i] = vdupq_n_s32(0);
-
-        for (int k4_step = 0; k4_step < QK8_0 / 4; ++k4_step) {
-            int8x16_t a_vec_0 = vld1q_s8(a_ptr);
-            a_ptr += 16;
-            int8x16_t a_vec_1;
-            if constexpr (MR_T > 4) a_vec_1 = vld1q_s8(a_ptr);
-            a_ptr += 16;
-
-            int8x16_t b_vec = vld1q_s8(b_ptr);
-            b_ptr += 16;
-
-            if constexpr (MR_T > 0) sum_v[0] = vdotq_laneq_s32(sum_v[0], b_vec, a_vec_0, 0);
-            if constexpr (MR_T > 1) sum_v[1] = vdotq_laneq_s32(sum_v[1], b_vec, a_vec_0, 1);
-            if constexpr (MR_T > 2) sum_v[2] = vdotq_laneq_s32(sum_v[2], b_vec, a_vec_0, 2);
-            if constexpr (MR_T > 3) sum_v[3] = vdotq_laneq_s32(sum_v[3], b_vec, a_vec_0, 3);
-            if constexpr (MR_T > 4) sum_v[4] = vdotq_laneq_s32(sum_v[4], b_vec, a_vec_1, 0);
-            if constexpr (MR_T > 5) sum_v[5] = vdotq_laneq_s32(sum_v[5], b_vec, a_vec_1, 1);
-            if constexpr (MR_T > 6) sum_v[6] = vdotq_laneq_s32(sum_v[6], b_vec, a_vec_1, 2);
-            if constexpr (MR_T > 7) sum_v[7] = vdotq_laneq_s32(sum_v[7], b_vec, a_vec_1, 3);
+        // 32-bit int accumulators for dot products
+        // sum_v[row][0] for cols 0-3, sum_v[row][1] for cols 4-7
+        int32x4_t sum_v[MR_T][2];
+        for (int i = 0; i < MR_T; ++i) {
+            sum_v[i][0] = vdupq_n_s32(0);
+            sum_v[i][1] = vdupq_n_s32(0);
         }
 
-        float32x4_t d_b_v;
+        // QK8_0 = 32. Step 4. Total 8 iters.
+        for (int k4_step = 0; k4_step < QK8_0 / 4; ++k4_step) {
+            // Load A: MR=4. pack_A interleaves 4 bytes per row.
+            // 4 rows * 4 bytes = 16 bytes. Fits in 1 register.
+            int8x16_t a_vec = vld1q_s8(a_ptr);
+            a_ptr += 16;
+
+            // Load B: NR=8. pack_B interleaves 4 bytes per col.
+            // 8 cols * 4 bytes = 32 bytes. Fits in 2 registers.
+            int8x16_t b_vec_0 = vld1q_s8(b_ptr);      // Cols 0-3
+            int8x16_t b_vec_1 = vld1q_s8(b_ptr + 16); // Cols 4-7
+            b_ptr += 32;
+
+            // Dot Products
+            // A lane 'i' corresponds to Row 'i'
+            if constexpr (MR_T > 0) {
+                sum_v[0][0] = vdotq_laneq_s32(sum_v[0][0], b_vec_0, a_vec, 0);
+                sum_v[0][1] = vdotq_laneq_s32(sum_v[0][1], b_vec_1, a_vec, 0);
+            }
+            if constexpr (MR_T > 1) {
+                sum_v[1][0] = vdotq_laneq_s32(sum_v[1][0], b_vec_0, a_vec, 1);
+                sum_v[1][1] = vdotq_laneq_s32(sum_v[1][1], b_vec_1, a_vec, 1);
+            }
+            if constexpr (MR_T > 2) {
+                sum_v[2][0] = vdotq_laneq_s32(sum_v[2][0], b_vec_0, a_vec, 2);
+                sum_v[2][1] = vdotq_laneq_s32(sum_v[2][1], b_vec_1, a_vec, 2);
+            }
+            if constexpr (MR_T > 3) {
+                sum_v[3][0] = vdotq_laneq_s32(sum_v[3][0], b_vec_0, a_vec, 3);
+                sum_v[3][1] = vdotq_laneq_s32(sum_v[3][1], b_vec_1, a_vec, 3);
+            }
+        }
+
+        // Load Scales
+        // B Scales: NR=8. 8 scales.
+        float32x4_t d_b_v0, d_b_v1;
         if constexpr (std::is_same_v<B_SCALE_TYPE, float>) {
-            d_b_v = vld1q_f32(reinterpret_cast<const float*>(bd_ptr));
+            d_b_v0 = vld1q_f32(bd_ptr);
+            d_b_v1 = vld1q_f32(bd_ptr + 4);
         } else {
-            d_b_v = vcvt_f32_f16(vld1_f16((const __fp16*)bd_ptr));
+            // Load 8 halfs, convert to 2x float32x4
+            float16x8_t b_scales_f16 = vld1q_f16((const __fp16 *) bd_ptr);
+            d_b_v0 = vcvt_f32_f16(vget_low_f16(b_scales_f16));
+            d_b_v1 = vcvt_f32_f16(vget_high_f16(b_scales_f16));
         }
         bd_ptr += NR;
 
-        float32x4_t d_a_v0 = vld1q_f32(ad_ptr);
-        float32x4_t d_a_v1;
-        if constexpr (MR_T > 4) d_a_v1 = vld1q_f32(ad_ptr + 4);
+        // A Scales: MR=4. 4 scales. Fits in 1 register.
+        float32x4_t d_a_v = vld1q_f32(ad_ptr);
         ad_ptr += MR;
 
-        if constexpr (MR_T > 0) c_v[0] = vmlaq_laneq_f32(c_v[0], vmulq_f32(vcvtq_f32_s32(sum_v[0]), d_b_v), d_a_v0, 0);
-        if constexpr (MR_T > 1) c_v[1] = vmlaq_laneq_f32(c_v[1], vmulq_f32(vcvtq_f32_s32(sum_v[1]), d_b_v), d_a_v0, 1);
-        if constexpr (MR_T > 2) c_v[2] = vmlaq_laneq_f32(c_v[2], vmulq_f32(vcvtq_f32_s32(sum_v[2]), d_b_v), d_a_v0, 2);
-        if constexpr (MR_T > 3) c_v[3] = vmlaq_laneq_f32(c_v[3], vmulq_f32(vcvtq_f32_s32(sum_v[3]), d_b_v), d_a_v0, 3);
-
-        if constexpr (MR_T > 4) c_v[4] = vmlaq_laneq_f32(c_v[4], vmulq_f32(vcvtq_f32_s32(sum_v[4]), d_b_v), d_a_v1, 0);
-        if constexpr (MR_T > 5) c_v[5] = vmlaq_laneq_f32(c_v[5], vmulq_f32(vcvtq_f32_s32(sum_v[5]), d_b_v), d_a_v1, 1);
-        if constexpr (MR_T > 6) c_v[6] = vmlaq_laneq_f32(c_v[6], vmulq_f32(vcvtq_f32_s32(sum_v[6]), d_b_v), d_a_v1, 2);
-        if constexpr (MR_T > 7) c_v[7] = vmlaq_laneq_f32(c_v[7], vmulq_f32(vcvtq_f32_s32(sum_v[7]), d_b_v), d_a_v1, 3);
+        // FMA: Accumulate (Sum * B_scale) * A_scale
+        // We broadcast the specific A scale for the row.
+        if constexpr (MR_T > 0) {
+            float32x4_t sum_f_0 = vcvtq_f32_s32(sum_v[0][0]);
+            float32x4_t sum_f_1 = vcvtq_f32_s32(sum_v[0][1]);
+            c_v[0][0] = vmlaq_laneq_f32(c_v[0][0], vmulq_f32(sum_f_0, d_b_v0), d_a_v, 0);
+            c_v[0][1] = vmlaq_laneq_f32(c_v[0][1], vmulq_f32(sum_f_1, d_b_v1), d_a_v, 0);
+        }
+        if constexpr (MR_T > 1) {
+            float32x4_t sum_f_0 = vcvtq_f32_s32(sum_v[1][0]);
+            float32x4_t sum_f_1 = vcvtq_f32_s32(sum_v[1][1]);
+            c_v[1][0] = vmlaq_laneq_f32(c_v[1][0], vmulq_f32(sum_f_0, d_b_v0), d_a_v, 1);
+            c_v[1][1] = vmlaq_laneq_f32(c_v[1][1], vmulq_f32(sum_f_1, d_b_v1), d_a_v, 1);
+        }
+        if constexpr (MR_T > 2) {
+            float32x4_t sum_f_0 = vcvtq_f32_s32(sum_v[2][0]);
+            float32x4_t sum_f_1 = vcvtq_f32_s32(sum_v[2][1]);
+            c_v[2][0] = vmlaq_laneq_f32(c_v[2][0], vmulq_f32(sum_f_0, d_b_v0), d_a_v, 2);
+            c_v[2][1] = vmlaq_laneq_f32(c_v[2][1], vmulq_f32(sum_f_1, d_b_v1), d_a_v, 2);
+        }
+        if constexpr (MR_T > 3) {
+            float32x4_t sum_f_0 = vcvtq_f32_s32(sum_v[3][0]);
+            float32x4_t sum_f_1 = vcvtq_f32_s32(sum_v[3][1]);
+            c_v[3][0] = vmlaq_laneq_f32(c_v[3][0], vmulq_f32(sum_f_0, d_b_v0), d_a_v, 3);
+            c_v[3][1] = vmlaq_laneq_f32(c_v[3][1], vmulq_f32(sum_f_1, d_b_v1), d_a_v, 3);
+        }
     }
 
+    // Store results
     for (int i = 0; i < MR_T; ++i) {
-        vst1q_f32(C + i * ldc, c_v[i]);
+        vst1q_f32(C + i * ldc + 0, c_v[i][0]);
+        vst1q_f32(C + i * ldc + 4, c_v[i][1]);
     }
 }
 
@@ -145,10 +196,6 @@ static void gemm_q8_0_microkernel(
         case 2: gemm_q8_0_microkernel_specialized<2>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
         case 3: gemm_q8_0_microkernel_specialized<3>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
         case 4: gemm_q8_0_microkernel_specialized<4>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
-        case 5: gemm_q8_0_microkernel_specialized<5>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
-        case 6: gemm_q8_0_microkernel_specialized<6>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
-        case 7: gemm_q8_0_microkernel_specialized<7>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
-        case 8: gemm_q8_0_microkernel_specialized<8>(kc_size, A_qs_packed, A_d_packed, B_qs_packed, B_d_packed, C, ldc, accumulate); break;
     }
 }
 
@@ -191,14 +238,13 @@ static void gemm_q8_0_compute_packed(
     float* C, int ldc)
 {
     const int K_BLOCKS = K / QK8_0;
-    constexpr int MC = 32;
-    constexpr int KC = 1024;
-    constexpr int NC = 32;
+    constexpr int KC = 2048;
+    constexpr int NC = 64;
 
     const int num_nc_blocks = (N + NC - 1) / NC;
 
     if (M <= MR) {
-        dispatch_for<Policy>(0, num_nc_blocks, [&](int64_t jc_idx) {
+        dispatch_for<Policy>(0, num_nc_blocks, [&](int jc_idx) {
             int jc = jc_idx * NC;
             const int nc = std::min(NC, N - jc);
             for (int jr = 0; jr < nc; jr += NR) {
@@ -214,24 +260,21 @@ static void gemm_q8_0_compute_packed(
             }
         });
     } else {
-        dispatch_for<Policy>(0, num_nc_blocks, [&](int64_t jc_idx) {
+        dispatch_for<Policy>(0, num_nc_blocks, [&](int jc_idx) {
             int jc = jc_idx * NC;
             const int nc = std::min(NC, N - jc);
             for (int kc = 0; kc < K; kc += KC) {
                 const int kc_size = std::min(KC, K - kc);
                 const int k_block_offset = kc / QK8_0;
-                for (int ic = 0; ic < M; ic += MC) {
-                    const int mc = std::min(MC, M - ic);
-                    for (int jr = 0; jr < nc; jr += NR) {
-                        for (int ir = 0; ir < mc; ir += MR) {
-                            gemm_q8_0_microkernel(
-                                kc_size, std::min(MR, mc - ir),
-                                A_qs_packed + (ic + ir) * K + kc * MR,
-                                A_d_packed + (ic + ir) * K_BLOCKS + k_block_offset * MR,
-                                B_qs_packed + (jc + jr) * K + kc * NR,
-                                B_d_packed_f16 + (jc + jr) * K_BLOCKS + k_block_offset * NR,
-                                C + (ic + ir) * ldc + (jc + jr), ldc, kc != 0);
-                        }
+                for (int jr = 0; jr < nc; jr += NR) {
+                    for (int ir = 0; ir < M; ir += MR) {
+                        gemm_q8_0_microkernel(
+                            kc_size, std::min(MR, M - ir),
+                            A_qs_packed + (ir) * K + kc * MR,
+                            A_d_packed + (ir) * K_BLOCKS + k_block_offset * MR,
+                            B_qs_packed + (jc + jr) * K + kc * NR,
+                            B_d_packed_f16 + (jc + jr) * K_BLOCKS + k_block_offset * NR,
+                            C + (ir) * ldc + (jc + jr), ldc, kc != 0);
                     }
                 }
             }
@@ -240,16 +283,25 @@ static void gemm_q8_0_compute_packed(
 }
 
 // ------------------------- quantize weight + repack -------------------------
-template<typename D_TYPE>
+template<typename SRC_T, typename D_TYPE>
 static void quantize_row_q8_0_no_repack(
-    const float * src,
+    const SRC_T * src,
     int8_t* dest_qs,
     D_TYPE* dest_d,
     int64_t K)
 {
     const int64_t k_blocks = K / QK8_0;
     for (int i = 0; i < k_blocks; ++i) {
-        quantize_block_q8_0(src + i * QK8_0, &dest_d[i], dest_qs + i * QK8_0);
+        if constexpr (std::is_same_v<SRC_T, float>) {
+            quantize_block_q8_0(src + i * QK8_0, &dest_d[i], dest_qs + i * QK8_0);
+        } else {
+            float buf[QK8_0];
+            const SRC_T* blk = src + i * QK8_0;
+            for (int j = 0; j < QK8_0; ++j) {
+                buf[j] = static_cast<float>(blk[j]);
+            }
+            quantize_block_q8_0(buf, &dest_d[i], dest_qs + i * QK8_0);
+        }
     }
 }
 
@@ -290,33 +342,48 @@ template void repack_B_q8_0_from_ptr<at::Half>(
     const int8_t* src_qs, const at::Half* src_d,
     int8_t* dest_qs_packed, at::Half* dest_d_packed);
 
-std::vector<torch::Tensor> quantize_weight_only(torch::Tensor B_float) {
-    TORCH_CHECK(B_float.dim() == 2, "Weight must be 2D");
-    TORCH_CHECK(B_float.is_contiguous(), "Weight must be contiguous");
-    TORCH_CHECK(B_float.device().is_cpu(), "Weight must be on CPU");
-    TORCH_CHECK(B_float.scalar_type() == torch::kFloat32, "Weight must be float32 for quantize_weight_only");
+std::vector<torch::Tensor> quantize_weight_only(torch::Tensor B_input) {
+    TORCH_CHECK(B_input.dim() == 2, "Weight must be 2D");
+    TORCH_CHECK(B_input.is_contiguous(), "Weight must be contiguous");
+    TORCH_CHECK(B_input.device().is_cpu(), "Weight must be on CPU");
+    
+    auto val_type = B_input.scalar_type();
+    TORCH_CHECK(val_type == torch::kFloat32 || val_type == torch::kHalf || val_type == torch::kBFloat16, 
+        "Weight must be float32, float16 or bfloat16 for quantize_weight_only");
 
-    const auto N = B_float.size(0);
-    const auto K = B_float.size(1);
+    const auto N = B_input.size(0);
+    const auto K = B_input.size(1);
     TORCH_CHECK(K % QK8_0 == 0, "K must be multiple of ", QK8_0);
 
     const int K_BLOCKS = K / QK8_0;
     auto B_qs_tensor = torch::empty({N, K}, torch::kInt8);
     auto B_d_tensor  = torch::empty({N, K_BLOCKS}, torch::kHalf);
 
-    at::parallel_for(0, N, 0, [&](int64_t s, int64_t e) {
-        for (int64_t j = s; j < e; ++j) {
-            quantize_row_q8_0_no_repack(
-                B_float.data_ptr<float>() + j * K,
-                B_qs_tensor.data_ptr<int8_t>() + j * K,
-                reinterpret_cast<at::Half*>(B_d_tensor.data_ptr<at::Half>() + j * K_BLOCKS),
-                K
-            );
-        }
-    });
+    auto launch_quant = [&](auto type_dummy) {
+        using T = decltype(type_dummy);
+        const T* B_ptr = B_input.data_ptr<T>();
+        at::parallel_for(0, N, 0, [&](int64_t s, int64_t e) {
+            for (int64_t j = s; j < e; ++j) {
+                quantize_row_q8_0_no_repack(
+                    B_ptr + j * K,
+                    B_qs_tensor.data_ptr<int8_t>() + j * K,
+                    reinterpret_cast<at::Half*>(B_d_tensor.data_ptr<at::Half>() + j * K_BLOCKS),
+                    K
+                );
+            }
+        });
+    };
+
+    if (val_type == torch::kFloat32) {
+        launch_quant(float{});
+    } else if (val_type == torch::kHalf) {
+        launch_quant(at::Half{});
+    } else if (val_type == torch::kBFloat16) {
+        launch_quant(at::BFloat16{});
+    }
+
     return {B_qs_tensor, B_d_tensor};
 }
-
 // ------------------------- MoE routing preprocess (topk=1/8) -------------------------
 struct MoETokenInfo {
     int32_t token_id;
@@ -664,7 +731,7 @@ void moe_q8_forward_ptr_impl(
                 int8_t* local_x_qs = pool_x_qs[tp];
                 float*  local_x_d  = pool_x_d[tp];
 
-                exec->pool->parallel_for(0, num_tokens, [&](int64_t i) {
+                exec->pool->parallel_for_static(0, num_tokens, [&](int64_t i) {
                     const T* src_row = x_in_ptr + i * hidden_dim;
                     for (int k_block = 0; k_block < (int)hidden_dim_k_blocks; ++k_block) {
                         float y_block[QK8_0];
@@ -765,7 +832,7 @@ void moe_q8_forward_ptr_impl(
         for (int tp = 0; tp < (int)tp_size; ++tp) {
             auto exec = nanovllm::NumaExecutorManager::get(tp);
             futures.emplace_back(exec->launcher->submit([&, tp, exec]() {
-                exec->pool->parallel_for(0, num_tokens, [&](int64_t t) {
+                exec->pool->parallel_for_static(0, num_tokens, [&](int64_t t) {
                     float* acc = pool_y_partial[tp] + t * hidden_dim;
                     std::memset(acc, 0, (size_t)hidden_dim * sizeof(float));
                     for (int k = 0; k < (int)top_k; ++k) {
@@ -794,7 +861,7 @@ void moe_q8_forward_ptr_impl(
     // ----------------------------------------------------------------
     {
         auto fut = exec0->launcher->submit([&, exec0]() {
-            exec0->pool->parallel_for(0, num_tokens, [&](int64_t t) {
+            exec0->pool->parallel_for_static(0, num_tokens, [&](int64_t t) {
                 float* acc = pool_y_partial[0] + t * hidden_dim;
                 for (int tp = 1; tp < (int)tp_size; ++tp) {
                     // Remote read from each node's partial result
