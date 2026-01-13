@@ -156,11 +156,10 @@ void MoEInfer::store_quantized_weights_repack(
 }
 
 void MoEInfer::quantize_and_store_expert(
-    int64_t expert_idx, const std::string& proj_name, const torch::Tensor& weight_fp32_cpu) {
+    int64_t expert_idx, const std::string& proj_name, const torch::Tensor& weight_cpu) {
 
-    TORCH_CHECK(weight_fp32_cpu.device().is_cpu(), "weight must be CPU");
-    TORCH_CHECK(weight_fp32_cpu.is_contiguous(), "weight must be contiguous");
-    TORCH_CHECK(weight_fp32_cpu.scalar_type() == torch::kFloat32, "weight must be float32");
+    TORCH_CHECK(weight_cpu.device().is_cpu(), "weight must be CPU");
+    TORCH_CHECK(weight_cpu.is_contiguous(), "weight must be contiguous");
 
     const int64_t I = intermediate_size_;
     const int64_t Ish = intermediate_shard_;
@@ -169,7 +168,7 @@ void MoEInfer::quantize_and_store_expert(
     const int64_t Ish_BLK = Ish / 32;
     const int64_t I_BLK = I / 32;
 
-    std::vector<torch::Tensor> q = quantize_weight_only(weight_fp32_cpu);
+    std::vector<torch::Tensor> q = quantize_weight_only(weight_cpu);
     torch::Tensor& qs = q[0];
     torch::Tensor& d  = q[1];
 
