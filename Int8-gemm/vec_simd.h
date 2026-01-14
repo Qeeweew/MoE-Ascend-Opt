@@ -33,11 +33,10 @@ inline static float32x4_t ggml_v_expf(float32x4_t x) {
 }
 
 // SiLU(gate) * up, in-place on C (layout: [gate | up] interleaved by halves)
-template <ExecutionPolicy Policy>
 static void silu_and_mul(float* C, int num_tokens, int intermediate_size_x2) {
     const int size_div_2 = intermediate_size_x2 / 2;
 
-    dispatch_for<Policy>(0, num_tokens, [&](int64_t i) {
+    for (int i = 0; i < num_tokens; ++i) {
         float* row = C + i * intermediate_size_x2;
         float* gate_part = row;
         float* up_part = row + size_div_2;
@@ -61,7 +60,7 @@ static void silu_and_mul(float* C, int num_tokens, int intermediate_size_x2) {
             float activation = gate_val / (1.0f + expf(-gate_val));
             row[j] = up_part[j] * activation;
         }
-    });
+    };
 }
 
 #else
