@@ -200,7 +200,6 @@ static void gemm_q8_0_microkernel(
 }
 
 // ------------------------- pack/quantize A -------------------------
-template <ExecutionPolicy Policy, typename T>
 static void quantize_pack_A_q8_0(
     int M, int K, const float* A, int lda,
     int8_t* A_qs_packed, float* A_d_packed)
@@ -208,7 +207,7 @@ static void quantize_pack_A_q8_0(
     const int K_BLOCKS = K / QK8_0;
     const int num_a_packs = (M + MR - 1) / MR;
 
-    dispatch_for<Policy>(0, num_a_packs, [&](int64_t i_pack) {
+    for (int i_pack = 0; i_pack < num_a_packs; ++ i_pack) {
         int8_t a_qs_buf[MR * QK8_0];
         int i = i_pack * MR;
         for (int j = 0; j < K_BLOCKS; ++j) {
@@ -227,10 +226,9 @@ static void quantize_pack_A_q8_0(
                 }
             }
         }
-    });
+    };
 }
 
-template <ExecutionPolicy Policy>
 static void gemm_q8_0_compute_packed(
     int M, int N, int K,
     const int8_t* A_qs_packed, const float* A_d_packed,
@@ -244,7 +242,7 @@ static void gemm_q8_0_compute_packed(
     const int num_nc_blocks = (N + NC - 1) / NC;
 
     if (M <= MR) {
-        dispatch_for<Policy>(0, num_nc_blocks, [&](int jc_idx) {
+        for (int jc_idx = 0; jc_idx < num_nc_blocks; ++jc_idx) {
             int jc = jc_idx * NC;
             const int nc = std::min(NC, N - jc);
             for (int jr = 0; jr < nc; jr += NR) {
@@ -258,9 +256,9 @@ static void gemm_q8_0_compute_packed(
                     ldc,
                     false);
             }
-        });
+        };
     } else {
-        dispatch_for<Policy>(0, num_nc_blocks, [&](int jc_idx) {
+        for (int jc_idx = 0; jc_idx < num_nc_blocks; ++jc_idx) {
             int jc = jc_idx * NC;
             const int nc = std::min(NC, N - jc);
             for (int kc = 0; kc < K; kc += KC) {
@@ -278,7 +276,7 @@ static void gemm_q8_0_compute_packed(
                     }
                 }
             }
-        });
+        };
     }
 }
 
@@ -458,7 +456,6 @@ static void preprocess_moe_routing(
 }
 
 // ------------------------- pack A from per-token quant (indirect) -------------------------
-template <ExecutionPolicy Policy>
 static void pack_A_q8_0_from_quantized_indirect(
     int M, int K,
     const int8_t* x_qs_base,
@@ -471,7 +468,7 @@ static void pack_A_q8_0_from_quantized_indirect(
     const int K_BLOCKS = K / QK8_0;
     const int num_a_packs = (M + MR - 1) / MR;
 
-    dispatch_for<Policy>(0, num_a_packs, [&](int64_t i_pack) {
+    for (int i_pack = 0; i_pack < num_a_packs; ++ i_pack) {
         int row_in_expert = i_pack * MR;
         for (int j = 0; j < K_BLOCKS; ++j) {
             int M_rem = std::min(MR, M - row_in_expert);
@@ -493,7 +490,7 @@ static void pack_A_q8_0_from_quantized_indirect(
                 }
             }
         }
-    });
+    };
 }
 
 static inline size_t align_to_64(size_t n) { return (n + 63) & ~63; }
@@ -669,7 +666,6 @@ void moe_q8_forward_ptr_impl(
     // 1. Prepare Pool Memory
     g_numa_pool.ensure_capacity(num_tokens, hidden_dim, tp_size, top_k);
     
-    // Get pointers from pool (vectors of length tp_size)
     const auto& pool_x_qs = g_numa_pool.x_qs_ptrs;
     const auto& pool_x_d  = g_numa_pool.x_d_ptrs;
     const auto& pool_expert_out = g_numa_pool.expert_out_ptrs;
@@ -678,6 +674,7 @@ void moe_q8_forward_ptr_impl(
     const int64_t intermediate_shard = intermediate_size / tp_size;
     const int64_t hidden_dim_k_blocks = hidden_dim / QK8_0;
 
+    // 2. Preprocess Routing (Global)
     std::vector<int> expert_counts(num_experts, 0);
     std::vector<int> expert_starts(num_experts + 1, 0);
     std::vector<MoETokenInfo> token_map;
@@ -693,189 +690,152 @@ void moe_q8_forward_ptr_impl(
         return;
     }
 
+    // 3. Generate Common Compute Tasks
+    // Since TP slices weights, every rank processes the same expert blocks, just with different weight pointers.
     constexpr int M_BLOCK = 32;
-    struct MoeTask { int expert_id, tp_rank, num_tokens, global_token_start_pos; };
-    std::vector<MoeTask> tasks;
-    tasks.reserve((size_t)total_expert_tokens / M_BLOCK * (size_t)tp_size + (size_t)num_experts * (size_t)tp_size);
+    struct MoeTask { int expert_id, num_tokens, global_token_start_pos; };
+    std::vector<MoeTask> global_tasks;
+    global_tasks.reserve((size_t)total_expert_tokens / M_BLOCK + (size_t)num_experts);
 
     for (int exp_id = 0; exp_id < (int)num_experts; ++exp_id) {
         const int count = expert_counts[exp_id];
         if (count == 0) continue;
         const int start_pos = expert_starts[exp_id];
         for (int offset = 0; offset < count; offset += M_BLOCK) {
-            const int cnt_blk = std::min(M_BLOCK, count - offset);
-            for (int tp = 0; tp < (int)tp_size; ++tp) {
-                tasks.push_back({exp_id, tp, cnt_blk, start_pos + offset});
-            }
+            global_tasks.push_back({exp_id, std::min(M_BLOCK, count - offset), start_pos + offset});
         }
     }
 
-    std::vector<std::vector<int>> tasks_by_tp((size_t)tp_size);
-    for (int i = 0; i < (int)tasks.size(); ++i) {
-        tasks_by_tp[(size_t)tasks[i].tp_rank].push_back(i);
-    }
+    // 4. Launch Distributed Execution (Pipeline A -> B -> C1)
+    std::vector<std::future<void>> futures;
+    futures.reserve((size_t)tp_size);
 
-    // Prepare Node 0 executor for final reduce
-    auto exec0 = nanovllm::NumaExecutorManager::get(0);
+    for (int tp = 0; tp < (int)tp_size; ++tp) {
+        auto exec = nanovllm::NumaExecutorManager::get(tp);
+        
+        // Submit one fused job per TP rank
+        futures.emplace_back(exec->launcher->submit([&, tp, exec]() {
+            
+            // --- Stage A: Quantize Input (Local Replica) ---
+            int8_t* local_x_qs = pool_x_qs[tp];
+            float*  local_x_d  = pool_x_d[tp];
 
-    // ----------------------------------------------------------------
-    // Stage A: Quantize input (Distributed on ALL NODES)
-    // 每个节点读取 x_in_ptr (remote read if not node 0) 并写入自己的 pool_x_qs[tp] (local write)
-    // ----------------------------------------------------------------
-    {
-        std::vector<std::future<void>> futures;
-        futures.reserve((size_t)tp_size);
-        for (int tp = 0; tp < (int)tp_size; ++tp) {
-            auto exec = nanovllm::NumaExecutorManager::get(tp);
-            futures.emplace_back(exec->launcher->submit([&, tp, exec]() {
-                int8_t* local_x_qs = pool_x_qs[tp];
-                float*  local_x_d  = pool_x_d[tp];
-
-                exec->pool->parallel_for_static(0, num_tokens, [&](int64_t i) {
-                    const T* src_row = x_in_ptr + i * hidden_dim;
-                    for (int k_block = 0; k_block < (int)hidden_dim_k_blocks; ++k_block) {
-                        float y_block[QK8_0];
-                        for (int j = 0; j < QK8_0; ++j) {
-                            y_block[j] = static_cast<float>(src_row[k_block * QK8_0 + j]);
-                        }
-                        quantize_block_q8_0(
-                            y_block,
-                            local_x_d + i * hidden_dim_k_blocks + k_block,
-                            local_x_qs + i * hidden_dim + k_block * QK8_0
-                        );
+            exec->pool->parallel_for_static(0, num_tokens, [&](int64_t i) {
+                const T* src_row = x_in_ptr + i * hidden_dim;
+                for (int k_block = 0; k_block < (int)hidden_dim_k_blocks; ++k_block) {
+                    float y_block[QK8_0];
+                    for (int j = 0; j < QK8_0; ++j) {
+                        y_block[j] = static_cast<float>(src_row[k_block * QK8_0 + j]);
                     }
-                });
-            }));
-        }
-        for (auto& f : futures) f.get();
-    }
-
-    // ----------------------------------------------------------------
-    // Stage B: Expert compute (Distributed across TP nodes)
-    // ----------------------------------------------------------------
-    auto process_task = [&](const MoeTask& task) {
-        ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
-
-        const int exp_id = task.expert_id;
-        const int tp_rank = task.tp_rank;
-        const int count = task.num_tokens;
-        const int global_start_pos = task.global_token_start_pos;
-
-        const int64_t H = hidden_dim;
-        const int64_t Ish = intermediate_shard;
-        const int64_t H_BLK = H / QK8_0;
-        const int64_t Ish_BLK = Ish / QK8_0;
-
-        const int8_t* gate_up_qs_ptr = gate_up_qs_tp[tp_rank] + (int64_t)exp_id * (2 * Ish) * H;
-        const at::Half* gate_up_d_ptr = gate_up_d_tp[tp_rank]  + (int64_t)exp_id * (2 * Ish) * H_BLK;
-        const int8_t* down_qs_ptr = down_proj_qs_tp[tp_rank] + (int64_t)exp_id * H * Ish;
-        const at::Half* down_d_ptr = down_proj_d_tp[tp_rank]  + (int64_t)exp_id * H * Ish_BLK;
-
-        // Use node-local quantized input
-        const int8_t* current_x_qs = pool_x_qs[tp_rank];
-        const float*  current_x_d  = pool_x_d[tp_rank];
-
-        pack_A_q8_0_from_quantized_indirect<ExecutionPolicy::Sequential>(
-            count, (int)hidden_dim, current_x_qs, current_x_d, token_map.data(), global_start_pos,
-            ws.A_qs_packed1, ws.A_d_packed1
-        );
-
-        gemm_q8_0_compute_packed<ExecutionPolicy::Sequential>(
-            count, (int)(2 * intermediate_shard), (int)hidden_dim,
-            ws.A_qs_packed1, ws.A_d_packed1,
-            gate_up_qs_ptr, reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
-            ws.expert_intermediate1, (int)(2 * intermediate_shard)
-        );
-
-        silu_and_mul<ExecutionPolicy::Sequential>(ws.expert_intermediate1, count, (int)(2 * intermediate_shard));
-
-        quantize_pack_A_q8_0<ExecutionPolicy::Sequential, float>(
-            count, (int)intermediate_shard,
-            ws.expert_intermediate1, (int)(2 * intermediate_shard),
-            ws.A_qs_packed2, ws.A_d_packed2
-        );
-
-        // Write to node-local expert output buffer
-        float* out = pool_expert_out[tp_rank] + (int64_t)global_start_pos * (int64_t)hidden_dim;
-
-        gemm_q8_0_compute_packed<ExecutionPolicy::Sequential>(
-            count, (int)hidden_dim, (int)intermediate_shard,
-            ws.A_qs_packed2, ws.A_d_packed2,
-            down_qs_ptr, reinterpret_cast<const ggml_half*>(down_d_ptr),
-            out, (int)hidden_dim
-        );
-    };
-
-    {
-        std::vector<std::future<void>> futures;
-        futures.reserve((size_t)tp_size);
-        for (int tp = 0; tp < (int)tp_size; ++tp) {
-            auto exec = nanovllm::NumaExecutorManager::get(tp);
-            futures.emplace_back(exec->launcher->submit([&, tp, exec]() {
-                const auto& ids = tasks_by_tp[(size_t)tp];
-                exec->pool->parallel_for(0, (int64_t)ids.size(), [&](int64_t ii) {
-                    const MoeTask& task = tasks[ids[(size_t)ii]];
-                    process_task(task);
-                });
-            }));
-        }
-        for (auto& f : futures) f.get();
-    }
-
-    // ----------------------------------------------------------------
-    // Stage C-1: TP-local Scatter + WeightedSum
-    // ----------------------------------------------------------------
-    {
-        std::vector<std::future<void>> futures;
-        futures.reserve((size_t)tp_size);
-
-        for (int tp = 0; tp < (int)tp_size; ++tp) {
-            auto exec = nanovllm::NumaExecutorManager::get(tp);
-            futures.emplace_back(exec->launcher->submit([&, tp, exec]() {
-                exec->pool->parallel_for_static(0, num_tokens, [&](int64_t t) {
-                    float* acc = pool_y_partial[tp] + t * hidden_dim;
-                    std::memset(acc, 0, (size_t)hidden_dim * sizeof(float));
-                    for (int k = 0; k < (int)top_k; ++k) {
-                        const int scatter_idx = (int)(t * top_k + k);
-                        const int src_row_idx = scatter_map[scatter_idx];
-                        if (src_row_idx == -1) continue;
-
-                        const float w = routing_weights_ptr[scatter_idx];
-                        // Read from node-local expert output
-                        const float* src_row =
-                            pool_expert_out[tp] + (int64_t)src_row_idx * (int64_t)hidden_dim;
-
-                        for (int j = 0; j < (int)hidden_dim; ++j) {
-                            acc[j] += w * src_row[j];
-                        }
-                    }
-                });
-            }));
-        }
-
-        for (auto& f : futures) f.get();
-    }
-
-    // ----------------------------------------------------------------
-    // Stage C-2: Final Reduce on Node 0
-    // ----------------------------------------------------------------
-    {
-        auto fut = exec0->launcher->submit([&, exec0]() {
-            exec0->pool->parallel_for_static(0, num_tokens, [&](int64_t t) {
-                float* acc = pool_y_partial[0] + t * hidden_dim;
-                for (int tp = 1; tp < (int)tp_size; ++tp) {
-                    // Remote read from each node's partial result
-                    const float* src = pool_y_partial[tp] + t * hidden_dim;
-                    for (int j = 0; j < (int)hidden_dim; ++j) acc[j] += src[j];
+                    quantize_block_q8_0(
+                        y_block,
+                        local_x_d + i * hidden_dim_k_blocks + k_block,
+                        local_x_qs + i * hidden_dim + k_block * QK8_0
+                    );
                 }
-
-                T* dst = y_out_ptr + t * hidden_dim;
-                for (int j = 0; j < (int)hidden_dim; ++j) dst[j] = (T)acc[j];
             });
-        });
-        fut.get();
+
+            // --- Stage B: Expert Compute ---
+            exec->pool->parallel_for(0, (int64_t)global_tasks.size(), [&](int64_t task_idx) {
+                const MoeTask& task = global_tasks[task_idx];
+                
+                // Ensure TLS workspace
+                ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
+
+                const int exp_id = task.expert_id;
+                const int count = task.num_tokens;
+                const int global_start_pos = task.global_token_start_pos;
+
+                const int64_t H = hidden_dim;
+                const int64_t Ish = intermediate_shard;
+                const int64_t H_BLK = H / QK8_0;
+                const int64_t Ish_BLK = Ish / QK8_0;
+
+                // Select TP-shard weights
+                const int8_t* gate_up_qs_ptr = gate_up_qs_tp[tp] + (int64_t)exp_id * (2 * Ish) * H;
+                const at::Half* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK;
+                const int8_t* down_qs_ptr = down_proj_qs_tp[tp] + (int64_t)exp_id * H * Ish;
+                const at::Half* down_d_ptr = down_proj_d_tp[tp] + (int64_t)exp_id * H * Ish_BLK;
+
+                // 1. Pack A (Indirect)
+                pack_A_q8_0_from_quantized_indirect(
+                    count, (int)hidden_dim, local_x_qs, local_x_d, token_map.data(), global_start_pos,
+                    ws.A_qs_packed1, ws.A_d_packed1
+                );
+
+                // 2. GEMM 1 (Gate + Up)
+                gemm_q8_0_compute_packed(
+                    count, (int)(2 * intermediate_shard), (int)hidden_dim,
+                    ws.A_qs_packed1, ws.A_d_packed1,
+                    gate_up_qs_ptr, reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
+                    ws.expert_intermediate1, (int)(2 * intermediate_shard)
+                );
+
+                // 3. Activation
+                silu_and_mul(ws.expert_intermediate1, count, (int)(2 * intermediate_shard));
+
+                // 4. Quantize Intermediate
+                quantize_pack_A_q8_0(
+                    count, (int)intermediate_shard,
+                    ws.expert_intermediate1, (int)(2 * intermediate_shard),
+                    ws.A_qs_packed2, ws.A_d_packed2
+                );
+
+                // 5. GEMM 2 (Down)
+                float* out = pool_expert_out[tp] + (int64_t)global_start_pos * (int64_t)hidden_dim;
+                gemm_q8_0_compute_packed(
+                    count, (int)hidden_dim, (int)intermediate_shard,
+                    ws.A_qs_packed2, ws.A_d_packed2,
+                    down_qs_ptr, reinterpret_cast<const ggml_half*>(down_d_ptr),
+                    out, (int)hidden_dim
+                );
+            });
+
+            // --- Stage C1: Local Scatter & Accumulate ---
+            float* local_y_partial = pool_y_partial[tp];
+            float* local_expert_out = pool_expert_out[tp];
+            
+            exec->pool->parallel_for_static(0, num_tokens, [&](int64_t t) {
+                float* acc = local_y_partial + t * hidden_dim;
+                std::memset(acc, 0, (size_t)hidden_dim * sizeof(float));
+                
+                for (int k = 0; k < (int)top_k; ++k) {
+                    const int scatter_idx = (int)(t * top_k + k);
+                    const int src_row_idx = scatter_map[scatter_idx];
+                    if (src_row_idx == -1) continue;
+
+                    const float w = routing_weights_ptr[scatter_idx];
+                    const float* src_row = local_expert_out + (int64_t)src_row_idx * (int64_t)hidden_dim;
+
+                    for (int j = 0; j < (int)hidden_dim; ++j) {
+                        acc[j] += w * src_row[j];
+                    }
+                }
+            });
+        }));
     }
 
+    // Wait for all nodes to finish Stages A, B, and C1
+    for (auto& f : futures) f.get();
+
+    // 5. Stage C2: Final Reduce on Node 0
+    auto exec0 = nanovllm::NumaExecutorManager::get(0);
+    auto fut = exec0->launcher->submit([&, exec0]() {
+        exec0->pool->parallel_for_static(0, num_tokens, [&](int64_t t) {
+            float* acc = pool_y_partial[0] + t * hidden_dim;
+            
+            // Sum partials from other TP nodes
+            for (int tp = 1; tp < (int)tp_size; ++tp) {
+                const float* src = pool_y_partial[tp] + t * hidden_dim;
+                for (int j = 0; j < (int)hidden_dim; ++j) acc[j] += src[j];
+            }
+
+            // Cast to output type
+            T* dst = y_out_ptr + t * hidden_dim;
+            for (int j = 0; j < (int)hidden_dim; ++j) dst[j] = (T)acc[j];
+        });
+    });
+    fut.get();
 }
 
 template void moe_q8_forward_ptr_impl<at::Half>(
