@@ -552,6 +552,7 @@ static thread_local ThreadWorkspace ws;
 struct NumaBufferPool {
     size_t capacity_tokens = 0;
     int64_t hidden_dim = 0;
+    int64_t intermediate_shard = 0;
     int64_t tp_size = 0;
     int64_t top_k = 0;
 
@@ -560,30 +561,32 @@ struct NumaBufferPool {
     std::vector<float*> x_d_ptrs;
     std::vector<float*> expert_out_ptrs;
     std::vector<float*> y_partial_ptrs;
+    
+    // Shared intermediate buffer for split-task optimization (num_tokens=1)
+    std::vector<float*> expert_inter_ptrs;
 
-    void ensure_capacity(int64_t req_tokens, int64_t req_hidden, int64_t req_tp, int64_t req_topk) {
+    void ensure_capacity(int64_t req_tokens, int64_t req_hidden, int64_t req_inter_shard, int64_t req_tp, int64_t req_topk) {
         
-        // 检查配置是否改变或容量是否不足
-        bool shape_changed = (req_hidden != hidden_dim) || (req_tp != tp_size) || (req_topk != top_k);
+        // Check if configuration changed
+        bool shape_changed = (req_hidden != hidden_dim) || (req_inter_shard != intermediate_shard) || (req_tp != tp_size) || (req_topk != top_k);
         bool size_grew = (req_tokens > (int64_t)capacity_tokens);
 
         if (!shape_changed && !size_grew && !x_qs_ptrs.empty()) {
             return;
         }
 
-        // 如果配置改变或扩容，先释放旧内存
-        // (为了简单起见，这里选择全部释放重新分配。对于形状不变仅扩容的情况，也可以优化为realloc)
         if (capacity_tokens > 0) {
             free_buffers_unsafe();
         }
 
         if (shape_changed) {
             hidden_dim = req_hidden;
+            intermediate_shard = req_inter_shard;
             tp_size = req_tp;
             top_k = req_topk;
         }
 
-        // 倍增策略计算新容量
+        // Growth strategy
         size_t new_cap = (capacity_tokens == 0) ? (size_t)req_tokens : capacity_tokens;
         if (size_grew || new_cap < (size_t)req_tokens) {
             if (new_cap == 0) new_cap = 128; 
@@ -597,21 +600,25 @@ struct NumaBufferPool {
         x_d_ptrs.resize(tp_size);
         expert_out_ptrs.resize(tp_size);
         y_partial_ptrs.resize(tp_size);
+        expert_inter_ptrs.resize(tp_size);
 
-        // 计算各部分需要的字节数 (按最大容量计算)
         const size_t x_qs_sz = capacity_tokens * hidden_dim * sizeof(int8_t);
         const size_t x_d_sz  = capacity_tokens * (hidden_dim / QK8_0) * sizeof(float);
-        // expert_out 需容纳所有 tokens * top_k 的输出
         const size_t out_sz  = capacity_tokens * top_k * hidden_dim * sizeof(float);
         const size_t part_sz = capacity_tokens * hidden_dim * sizeof(float);
+        
+        // Intermediate buffer size: max_tasks * (2 * intermediate_shard).
+        // Max tasks = tokens * top_k.
+        const size_t inter_sz = capacity_tokens * top_k * (2 * intermediate_shard) * sizeof(float);
 
         for (int i = 0; i < tp_size; ++i) {
             x_qs_ptrs[i] = (int8_t*)numa_alloc_onnode(x_qs_sz, i);
             x_d_ptrs[i]  = (float*) numa_alloc_onnode(x_d_sz, i);
             expert_out_ptrs[i] = (float*)numa_alloc_onnode(out_sz, i);
             y_partial_ptrs[i]  = (float*)numa_alloc_onnode(part_sz, i);
+            expert_inter_ptrs[i] = (float*)numa_alloc_onnode(inter_sz, i);
 
-            TORCH_CHECK(x_qs_ptrs[i] && x_d_ptrs[i] && expert_out_ptrs[i] && y_partial_ptrs[i], 
+            TORCH_CHECK(x_qs_ptrs[i] && x_d_ptrs[i] && expert_out_ptrs[i] && y_partial_ptrs[i] && expert_inter_ptrs[i], 
                         "Numa allocation failed for node ", i);
         }
     }
@@ -622,17 +629,20 @@ struct NumaBufferPool {
         const size_t x_d_sz  = capacity_tokens * (hidden_dim / QK8_0) * sizeof(float);
         const size_t out_sz  = capacity_tokens * top_k * hidden_dim * sizeof(float);
         const size_t part_sz = capacity_tokens * hidden_dim * sizeof(float);
+        const size_t inter_sz = capacity_tokens * top_k * (2 * intermediate_shard) * sizeof(float);
 
         for (size_t i = 0; i < x_qs_ptrs.size(); ++i) {
             if (x_qs_ptrs[i]) numa_free(x_qs_ptrs[i], x_qs_sz);
             if (x_d_ptrs[i])  numa_free(x_d_ptrs[i], x_d_sz);
             if (expert_out_ptrs[i]) numa_free(expert_out_ptrs[i], out_sz);
             if (y_partial_ptrs[i])  numa_free(y_partial_ptrs[i], part_sz);
+            if (expert_inter_ptrs[i]) numa_free(expert_inter_ptrs[i], inter_sz);
         }
         x_qs_ptrs.clear();
         x_d_ptrs.clear();
         expert_out_ptrs.clear();
         y_partial_ptrs.clear();
+        expert_inter_ptrs.clear();
     }
 
     ~NumaBufferPool() {
@@ -663,15 +673,17 @@ void moe_q8_forward_ptr_impl(
     TORCH_CHECK(tp_size >= 1, "tp_size must be >= 1");
     TORCH_CHECK(numa_available() != -1, "libnuma not available");
 
+    const int64_t intermediate_shard = intermediate_size / tp_size;
+
     // 1. Prepare Pool Memory
-    g_numa_pool.ensure_capacity(num_tokens, hidden_dim, tp_size, top_k);
+    g_numa_pool.ensure_capacity(num_tokens, hidden_dim, intermediate_shard, tp_size, top_k);
     
     const auto& pool_x_qs = g_numa_pool.x_qs_ptrs;
     const auto& pool_x_d  = g_numa_pool.x_d_ptrs;
     const auto& pool_expert_out = g_numa_pool.expert_out_ptrs;
     const auto& pool_y_partial  = g_numa_pool.y_partial_ptrs;
+    const auto& pool_expert_inter = g_numa_pool.expert_inter_ptrs;
 
-    const int64_t intermediate_shard = intermediate_size / tp_size;
     const int64_t hidden_dim_k_blocks = hidden_dim / QK8_0;
 
     // 2. Preprocess Routing (Global)
@@ -691,7 +703,6 @@ void moe_q8_forward_ptr_impl(
     }
 
     // 3. Generate Common Compute Tasks
-    // Since TP slices weights, every rank processes the same expert blocks, just with different weight pointers.
     constexpr int M_BLOCK = 32;
     struct MoeTask { int expert_id, num_tokens, global_token_start_pos; };
     std::vector<MoeTask> global_tasks;
@@ -736,60 +747,158 @@ void moe_q8_forward_ptr_impl(
             });
 
             // --- Stage B: Expert Compute ---
-            exec->pool->parallel_for(0, (int64_t)global_tasks.size(), [&](int64_t task_idx) {
-                const MoeTask& task = global_tasks[task_idx];
+            if (num_tokens == 1) {
+                // Optimization for small batch: Split tasks to utilize threads better.
+                // Split GEMM1 (Gate+Up) into 2 parts per expert.
                 
-                // Ensure TLS workspace
-                ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
+                // Phase 1: GEMM 1 Split
+                exec->pool->parallel_for(0, (int64_t)global_tasks.size() * 2, [&](int64_t idx) {
+                    const int task_idx = idx / 2;
+                    const int split_idx = idx % 2; // 0: First half (Gate), 1: Second half (Up)
+                    
+                    const MoeTask& task = global_tasks[task_idx];
+                    ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
 
-                const int exp_id = task.expert_id;
-                const int count = task.num_tokens;
-                const int global_start_pos = task.global_token_start_pos;
+                    const int exp_id = task.expert_id;
+                    const int count = task.num_tokens; // Always 1
+                    const int global_start_pos = task.global_token_start_pos;
 
-                const int64_t H = hidden_dim;
-                const int64_t Ish = intermediate_shard;
-                const int64_t H_BLK = H / QK8_0;
-                const int64_t Ish_BLK = Ish / QK8_0;
+                    const int64_t H = hidden_dim;
+                    const int64_t Ish = intermediate_shard;
+                    const int64_t H_BLK = H / QK8_0;
+                    
+                    // Weights Pointers (GateUp is 2*Ish cols. Split at Ish)
+                    const int64_t col_offset = split_idx * Ish;
+                    const int8_t* gate_up_qs_ptr = gate_up_qs_tp[tp] + (int64_t)exp_id * (2 * Ish) * H 
+                                                 + col_offset * H;
+                    const at::Half* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK 
+                                                  + col_offset * H_BLK;
 
-                // Select TP-shard weights
-                const int8_t* gate_up_qs_ptr = gate_up_qs_tp[tp] + (int64_t)exp_id * (2 * Ish) * H;
-                const at::Half* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK;
-                const int8_t* down_qs_ptr = down_proj_qs_tp[tp] + (int64_t)exp_id * H * Ish;
-                const at::Half* down_d_ptr = down_proj_d_tp[tp] + (int64_t)exp_id * H * Ish_BLK;
+                    // Output buffer in shared memory (indexed by task_idx to avoid conflict)
+                    float* shared_inter_out = pool_expert_inter[tp] + (int64_t)task_idx * (2 * Ish) + col_offset;
 
-                // 1. Pack A (Indirect)
-                pack_A_q8_0_from_quantized_indirect(
-                    count, (int)hidden_dim, local_x_qs, local_x_d, token_map.data(), global_start_pos,
-                    ws.A_qs_packed1, ws.A_d_packed1
-                );
+                    // 1. Pack A (Both threads do it locally, redundancy is cheap)
+                    pack_A_q8_0_from_quantized_indirect(
+                        count, (int)hidden_dim, local_x_qs, local_x_d, token_map.data(), global_start_pos,
+                        ws.A_qs_packed1, ws.A_d_packed1
+                    );
 
-                // 2. GEMM 1 (Gate + Up)
-                gemm_q8_0_compute_packed(
-                    count, (int)(2 * intermediate_shard), (int)hidden_dim,
-                    ws.A_qs_packed1, ws.A_d_packed1,
-                    gate_up_qs_ptr, reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
-                    ws.expert_intermediate1, (int)(2 * intermediate_shard)
-                );
+                    // 2. GEMM 1 Partial
+                    gemm_q8_0_compute_packed(
+                        count, (int)Ish, (int)hidden_dim,
+                        ws.A_qs_packed1, ws.A_d_packed1,
+                        gate_up_qs_ptr, reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
+                        shared_inter_out, (int)(2 * Ish) // Stride is full width
+                    );
+                });
 
-                // 3. Activation
-                silu_and_mul(ws.expert_intermediate1, count, (int)(2 * intermediate_shard));
+                // Phase 2: SiLU + GEMM 2 Split
+                exec->pool->parallel_for(0, (int64_t)global_tasks.size() * 2, [&](int64_t idx) {
+                    const int task_idx = idx / 2;
+                    const int split_idx = idx % 2; // 0: First half of H, 1: Second half of H
+                    
+                    const MoeTask& task = global_tasks[task_idx];
+                    ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
 
-                // 4. Quantize Intermediate
-                quantize_pack_A_q8_0(
-                    count, (int)intermediate_shard,
-                    ws.expert_intermediate1, (int)(2 * intermediate_shard),
-                    ws.A_qs_packed2, ws.A_d_packed2
-                );
+                    const int exp_id = task.expert_id;
+                    const int count = task.num_tokens; 
+                    const int global_start_pos = task.global_token_start_pos;
 
-                // 5. GEMM 2 (Down)
-                float* out = pool_expert_out[tp] + (int64_t)global_start_pos * (int64_t)hidden_dim;
-                gemm_q8_0_compute_packed(
-                    count, (int)hidden_dim, (int)intermediate_shard,
-                    ws.A_qs_packed2, ws.A_d_packed2,
-                    down_qs_ptr, reinterpret_cast<const ggml_half*>(down_d_ptr),
-                    out, (int)hidden_dim
-                );
-            });
+                    const int64_t H = hidden_dim;
+                    const int64_t Ish = intermediate_shard;
+                    const int64_t Ish_BLK = Ish / QK8_0;
+
+                    // Read from shared intermediate
+                    float* shared_inter_in = pool_expert_inter[tp] + (int64_t)task_idx * (2 * Ish);
+                    
+                    // 3. Activation (SiLU) - Copy to local and execute (Redundant but lock-free)
+                    std::memcpy(ws.expert_intermediate1, shared_inter_in, count * (2 * Ish) * sizeof(float));
+                    silu_and_mul(ws.expert_intermediate1, count, (int)(2 * Ish));
+
+                    // 4. Quantize Intermediate (Redundant)
+                    quantize_pack_A_q8_0(
+                        count, (int)intermediate_shard,
+                        ws.expert_intermediate1, (int)(2 * intermediate_shard),
+                        ws.A_qs_packed2, ws.A_d_packed2
+                    );
+
+                    // 5. GEMM 2 Partial (Split output dimension H)
+                    const int64_t H_split = H / 2;
+                    const int64_t N_chunk = (split_idx == 0) ? H_split : (H - H_split);
+                    const int64_t col_offset = split_idx * H_split;
+
+                    const int8_t* down_qs_ptr = down_proj_qs_tp[tp] + (int64_t)exp_id * H * Ish
+                                              + col_offset * Ish;
+                    const at::Half* down_d_ptr = down_proj_d_tp[tp] + (int64_t)exp_id * H * Ish_BLK
+                                               + col_offset * Ish_BLK;
+
+                    float* out = pool_expert_out[tp] + (int64_t)global_start_pos * H + col_offset;
+                    
+                    gemm_q8_0_compute_packed(
+                        count, (int)N_chunk, (int)Ish,
+                        ws.A_qs_packed2, ws.A_d_packed2,
+                        down_qs_ptr, reinterpret_cast<const ggml_half*>(down_d_ptr),
+                        out, (int)H // Stride is full H
+                    );
+                });
+
+            } else {
+                // Original Fused Pipeline for larger batch sizes
+                exec->pool->parallel_for(0, (int64_t)global_tasks.size(), [&](int64_t task_idx) {
+                    const MoeTask& task = global_tasks[task_idx];
+                    
+                    // Ensure TLS workspace
+                    ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
+
+                    const int exp_id = task.expert_id;
+                    const int count = task.num_tokens;
+                    const int global_start_pos = task.global_token_start_pos;
+
+                    const int64_t H = hidden_dim;
+                    const int64_t Ish = intermediate_shard;
+                    const int64_t H_BLK = H / QK8_0;
+                    const int64_t Ish_BLK = Ish / QK8_0;
+
+                    // Select TP-shard weights
+                    const int8_t* gate_up_qs_ptr = gate_up_qs_tp[tp] + (int64_t)exp_id * (2 * Ish) * H;
+                    const at::Half* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK;
+                    const int8_t* down_qs_ptr = down_proj_qs_tp[tp] + (int64_t)exp_id * H * Ish;
+                    const at::Half* down_d_ptr = down_proj_d_tp[tp] + (int64_t)exp_id * H * Ish_BLK;
+
+                    // 1. Pack A (Indirect)
+                    pack_A_q8_0_from_quantized_indirect(
+                        count, (int)hidden_dim, local_x_qs, local_x_d, token_map.data(), global_start_pos,
+                        ws.A_qs_packed1, ws.A_d_packed1
+                    );
+
+                    // 2. GEMM 1 (Gate + Up)
+                    gemm_q8_0_compute_packed(
+                        count, (int)(2 * intermediate_shard), (int)hidden_dim,
+                        ws.A_qs_packed1, ws.A_d_packed1,
+                        gate_up_qs_ptr, reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
+                        ws.expert_intermediate1, (int)(2 * intermediate_shard)
+                    );
+
+                    // 3. Activation
+                    silu_and_mul(ws.expert_intermediate1, count, (int)(2 * intermediate_shard));
+
+                    // 4. Quantize Intermediate
+                    quantize_pack_A_q8_0(
+                        count, (int)intermediate_shard,
+                        ws.expert_intermediate1, (int)(2 * intermediate_shard),
+                        ws.A_qs_packed2, ws.A_d_packed2
+                    );
+
+                    // 5. GEMM 2 (Down)
+                    float* out = pool_expert_out[tp] + (int64_t)global_start_pos * (int64_t)hidden_dim;
+                    gemm_q8_0_compute_packed(
+                        count, (int)hidden_dim, (int)intermediate_shard,
+                        ws.A_qs_packed2, ws.A_d_packed2,
+                        down_qs_ptr, reinterpret_cast<const ggml_half*>(down_d_ptr),
+                        out, (int)hidden_dim
+                    );
+                });
+            }
 
             // --- Stage C1: Local Scatter & Accumulate ---
             float* local_y_partial = pool_y_partial[tp];
