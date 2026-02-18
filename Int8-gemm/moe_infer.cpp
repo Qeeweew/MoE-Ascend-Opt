@@ -242,7 +242,7 @@ void MoEInfer::execute_on_cpu_routed_from_pointers(
     int64_t top_k,
     at::ScalarType dtype) {
 
-    TORCH_CHECK(top_k == 1 || top_k == 8, "top_k must be 1 or 8");
+    // TORCH_CHECK(top_k == 1 || top_k == 8, "top_k must be 1 or 8");
 
     AT_DISPATCH_REDUCED_FLOATING_TYPES(
         dtype, "moe_execute_routed_dispatch",
