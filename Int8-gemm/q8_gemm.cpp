@@ -15,8 +15,160 @@
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
+#include <chrono>
+#include <iomanip>
+#include <iostream>
+#include <map>
+#include <mutex>
 
 using ggml_half = at::Half;
+
+// ========================== Profiling Macros ==========================
+// Set to 1 to enable profiling, 0 to disable
+#define ENABLE_PROFILING 0
+
+namespace {
+    struct ProfilingEntry {
+        double stage_pre_ms = 0.0;  // Preprocessing (memory + routing)
+        double stage_abc_ms = 0.0;  // Distributed Execution (A: Quantize + B: Expert Compute + C1: Scatter)
+        double stage_c2_ms = 0.0;   // Final Reduce
+        double total_ms = 0.0;      // Total time
+    };
+
+    struct ProfilingStats {
+        std::vector<double> stage_pre_times;
+        std::vector<double> stage_abc_times;
+        std::vector<double> stage_c2_times;
+        std::vector<double> total_times;
+        int count = 0;
+
+        void add(const ProfilingEntry& entry) {
+            stage_pre_times.push_back(entry.stage_pre_ms);
+            stage_abc_times.push_back(entry.stage_abc_ms);
+            stage_c2_times.push_back(entry.stage_c2_ms);
+            total_times.push_back(entry.total_ms);
+            count++;
+        }
+
+        void print(int64_t num_tokens) const {
+            if (count == 0) return;
+
+            auto avg = [](const std::vector<double>& v) -> double {
+                if (v.empty()) return 0.0;
+                return std::accumulate(v.begin(), v.end(), 0.0) / v.size();
+            };
+
+            std::cout << "\n========== MoE Profiling [num_tokens=" << num_tokens
+                      << ", iterations=" << count << "] ==========\n";
+            std::cout << std::fixed << std::setprecision(4);
+            std::cout << "Stage PRE (Preprocessing):    " << avg(stage_pre_times) << " ms\n";
+            std::cout << "  - Memory allocation\n";
+            std::cout << "  - Routing preprocessing\n";
+            std::cout << "  - Task generation\n";
+            std::cout << "Stage ABC (Distributed Exec): " << avg(stage_abc_times) << " ms\n";
+            std::cout << "  - A: Quantize Input\n";
+            std::cout << "  - B: Expert Compute (GEMM1+Act+GEMM2)\n";
+            std::cout << "  - C1: Local Scatter & Accumulate\n";
+            std::cout << "Stage C2 (Final Reduce):      " << avg(stage_c2_times) << " ms\n";
+            std::cout << "Total:                        " << avg(total_times) << " ms\n";
+            std::cout << "============================================================\n";
+        }
+    };
+
+    static std::map<int64_t, ProfilingStats> g_profiling_data;
+    static std::mutex g_profiling_mutex;
+
+    struct ProfilingContext {
+        ProfilingEntry entry;
+        std::chrono::high_resolution_clock::time_point total_start;
+        std::chrono::high_resolution_clock::time_point stage_pre_start;
+        std::chrono::high_resolution_clock::time_point stage_abc_start;
+        std::chrono::high_resolution_clock::time_point stage_c2_start;
+
+        ProfilingContext() : total_start(std::chrono::high_resolution_clock::now()) {}
+
+        void start_stage_pre() {
+            stage_pre_start = std::chrono::high_resolution_clock::now();
+        }
+
+        void end_stage_pre() {
+            auto end = std::chrono::high_resolution_clock::now();
+            entry.stage_pre_ms = std::chrono::duration<double, std::milli>(end - stage_pre_start).count();
+        }
+
+        void start_stage_abc() {
+            stage_abc_start = std::chrono::high_resolution_clock::now();
+        }
+
+        void end_stage_abc() {
+            auto end = std::chrono::high_resolution_clock::now();
+            entry.stage_abc_ms = std::chrono::duration<double, std::milli>(end - stage_abc_start).count();
+        }
+
+        void start_stage_c2() {
+            stage_c2_start = std::chrono::high_resolution_clock::now();
+        }
+
+        void end_stage_c2() {
+            auto end = std::chrono::high_resolution_clock::now();
+            entry.stage_c2_ms = std::chrono::duration<double, std::milli>(end - stage_c2_start).count();
+        }
+
+        void finish_total() {
+            auto total_end = std::chrono::high_resolution_clock::now();
+            entry.total_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
+        }
+    };
+
+    static thread_local ProfilingContext* g_profiling_ctx = nullptr;
+}
+
+#if ENABLE_PROFILING
+    #define PROFILE_INIT(num_tokens) \
+        ProfilingContext _profile_ctx; \
+        g_profiling_ctx = &_profile_ctx; \
+        int64_t _profile_num_tokens = (num_tokens);
+
+    #define PROFILE_STAGE_BEGIN(name) \
+        g_profiling_ctx->start_##name();
+
+    #define PROFILE_STAGE_END(name) \
+        g_profiling_ctx->end_##name();
+
+    #define PROFILE_FINISH() \
+        do { \
+            g_profiling_ctx->finish_total(); \
+            std::lock_guard<std::mutex> _profile_lock(g_profiling_mutex); \
+            g_profiling_data[_profile_num_tokens].add(g_profiling_ctx->entry); \
+            g_profiling_ctx = nullptr; \
+        } while(0)
+
+    #define PRINT_PROFILING() \
+        do { \
+            std::cout << "\n====================== MoE Profiling Summary ======================\n"; \
+            for (const auto& kv : g_profiling_data) { \
+                kv.second.print(kv.first); \
+            } \
+            std::cout << "===============================================================\n"; \
+        } while(0)
+#else
+    #define PROFILE_INIT(num_tokens)
+    #define PROFILE_STAGE_BEGIN(name)
+    #define PROFILE_STAGE_END(name)
+    #define PROFILE_FINISH()
+    #define PRINT_PROFILING()
+#endif
+
+// Auto-print profiling on exit
+#if ENABLE_PROFILING
+static struct ProfilingCleanup {
+    ~ProfilingCleanup() {
+        PRINT_PROFILING();
+    }
+} g_profiling_cleanup;
+#endif
+
+// ========================== End Profiling Macros ==========================
 
 #define QK8_0 32
 #define MR 4
@@ -450,8 +602,13 @@ static void preprocess_moe_routing(
                 num_experts, num_tokens, selected_experts,
                 expert_counts, expert_starts, token_map, scatter_map);
             break;
+        case 10:
+            preprocess_moe_routing_template<10>(
+                num_experts, num_tokens, selected_experts,
+                expert_counts, expert_starts, token_map, scatter_map);
+            break;
         default:
-            TORCH_CHECK(false, "Unsupported top_k. Only 1 and 8 are supported.");
+            TORCH_CHECK(false, "Unsupported top_k. Only 1,8,10 are supported.");
     }
 }
 
@@ -670,12 +827,18 @@ void moe_q8_forward_ptr_impl(
     int64_t tp_size,
     int64_t top_k)
 {
+    PROFILE_INIT(num_tokens);
+
     TORCH_CHECK(tp_size >= 1, "tp_size must be >= 1");
     TORCH_CHECK(numa_available() != -1, "libnuma not available");
+
+    constexpr int H_CHUNK = 256;  // Chunk size for parallelizing hidden dimension
+    TORCH_CHECK(hidden_dim % H_CHUNK == 0, "hidden_dim must be a multiple of H_CHUNK (256), got ", hidden_dim);
 
     const int64_t intermediate_shard = intermediate_size / tp_size;
 
     // 1. Prepare Pool Memory
+    PROFILE_STAGE_BEGIN(stage_pre);
     g_numa_pool.ensure_capacity(num_tokens, hidden_dim, intermediate_shard, tp_size, top_k);
     
     const auto& pool_x_qs = g_numa_pool.x_qs_ptrs;
@@ -699,6 +862,7 @@ void moe_q8_forward_ptr_impl(
     const int total_expert_tokens = expert_starts[num_experts];
     if (total_expert_tokens == 0) {
         std::memset(y_out_ptr, 0, (size_t)num_tokens * (size_t)hidden_dim * sizeof(T));
+        PROFILE_FINISH();
         return;
     }
 
@@ -716,17 +880,19 @@ void moe_q8_forward_ptr_impl(
             global_tasks.push_back({exp_id, std::min(M_BLOCK, count - offset), start_pos + offset});
         }
     }
+    PROFILE_STAGE_END(stage_pre);
 
     // 4. Launch Distributed Execution (Pipeline A -> B -> C1)
+    PROFILE_STAGE_BEGIN(stage_abc);
     std::vector<std::future<void>> futures;
     futures.reserve((size_t)tp_size);
 
     for (int tp = 0; tp < (int)tp_size; ++tp) {
         auto exec = nanovllm::NumaExecutorManager::get(tp);
-        
+
         // Submit one fused job per TP rank
         futures.emplace_back(exec->launcher->submit([&, tp, exec]() {
-            
+
             // --- Stage A: Quantize Input (Local Replica) ---
             int8_t* local_x_qs = pool_x_qs[tp];
             float*  local_x_d  = pool_x_d[tp];
@@ -903,20 +1069,27 @@ void moe_q8_forward_ptr_impl(
             // --- Stage C1: Local Scatter & Accumulate ---
             float* local_y_partial = pool_y_partial[tp];
             float* local_expert_out = pool_expert_out[tp];
-            
-            exec->pool->parallel_for_static(0, num_tokens, [&](int64_t t) {
-                float* acc = local_y_partial + t * hidden_dim;
-                std::memset(acc, 0, (size_t)hidden_dim * sizeof(float));
-                
+
+            // Split hidden_dim by H_CHUNK to increase parallelism for small batches
+            const int64_t num_chunks = hidden_dim / H_CHUNK;
+
+            exec->pool->parallel_for_static(0, num_tokens * num_chunks, [&](int64_t idx) {
+                const int64_t t = idx / num_chunks;
+                const int64_t chunk_idx = idx % num_chunks;
+                const int64_t h_offset = chunk_idx * H_CHUNK;
+
+                float* acc = local_y_partial + t * hidden_dim + h_offset;
+                std::memset(acc, 0, H_CHUNK * sizeof(float));
+
                 for (int k = 0; k < (int)top_k; ++k) {
                     const int scatter_idx = (int)(t * top_k + k);
                     const int src_row_idx = scatter_map[scatter_idx];
                     if (src_row_idx == -1) continue;
 
                     const float w = routing_weights_ptr[scatter_idx];
-                    const float* src_row = local_expert_out + (int64_t)src_row_idx * (int64_t)hidden_dim;
+                    const float* src_row = local_expert_out + (int64_t)src_row_idx * (int64_t)hidden_dim + h_offset;
 
-                    for (int j = 0; j < (int)hidden_dim; ++j) {
+                    for (int j = 0; j < H_CHUNK; ++j) {
                         acc[j] += w * src_row[j];
                     }
                 }
@@ -926,25 +1099,40 @@ void moe_q8_forward_ptr_impl(
 
     // Wait for all nodes to finish Stages A, B, and C1
     for (auto& f : futures) f.get();
+    PROFILE_STAGE_END(stage_abc);
 
     // 5. Stage C2: Final Reduce on Node 0
+    PROFILE_STAGE_BEGIN(stage_c2);
     auto exec0 = nanovllm::NumaExecutorManager::get(0);
-    auto fut = exec0->launcher->submit([&, exec0]() {
-        exec0->pool->parallel_for_static(0, num_tokens, [&](int64_t t) {
-            float* acc = pool_y_partial[0] + t * hidden_dim;
-            
-            // Sum partials from other TP nodes
-            for (int tp = 1; tp < (int)tp_size; ++tp) {
-                const float* src = pool_y_partial[tp] + t * hidden_dim;
-                for (int j = 0; j < (int)hidden_dim; ++j) acc[j] += src[j];
-            }
 
-            // Cast to output type
-            T* dst = y_out_ptr + t * hidden_dim;
-            for (int j = 0; j < (int)hidden_dim; ++j) dst[j] = (T)acc[j];
-        });
+    // Split hidden_dim by H_CHUNK to increase parallelism for small batches
+    const int64_t num_chunks = hidden_dim / H_CHUNK;
+
+    exec0->pool->parallel_for_static(0, num_tokens * num_chunks, [&](int64_t idx) {
+        const int64_t t = idx / num_chunks;
+        const int64_t chunk_idx = idx % num_chunks;
+        const int64_t h_offset = chunk_idx * H_CHUNK;
+
+        float* acc = pool_y_partial[0] + t * hidden_dim + h_offset;
+
+        // Sum partials from other TP nodes
+        for (int tp = 1; tp < (int)tp_size; ++tp) {
+            const float* src = pool_y_partial[tp] + t * hidden_dim + h_offset;
+            for (int j = 0; j < H_CHUNK; ++j) {
+                acc[j] += src[j];
+            }
+        }
+
+        // Cast to output type
+        T* dst = y_out_ptr + t * hidden_dim + h_offset;
+        for (int j = 0; j < H_CHUNK; ++j) {
+            dst[j] = (T)acc[j];
+        }
     });
-    fut.get();
+
+    PROFILE_STAGE_END(stage_c2);
+
+    PROFILE_FINISH();
 }
 
 template void moe_q8_forward_ptr_impl<at::Half>(
