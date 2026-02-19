@@ -4,19 +4,22 @@ import math
 import torch
 import torch.utils.benchmark as benchmark
 import nanovllm_ext
+import time
 
 # =============================================================================
 # 1. 测试参数定义
 # =============================================================================
 HIDDEN_SIZE = 2048
-INTERMEDIATE_SIZE = 768
+INTERMEDIATE_SIZE = 512
 NUM_EXPERTS = 128
-TOP_K = 8
+TOP_K = 10
 
 RENORMALIZE = True  # 此测试只用均匀权重，不影响性能；保留参数语义
 
 MIN_RUN_TIME_S = 2.0
 NUM_WEIGHT_SETS = 4
+WARMUP_RUNS = 5          # Warmup iterations
+BENCHMARK_RUNS = 50      # Number of benchmark iterations to average
 TOKEN_COUNTS_TO_TEST = list(range(1, 9)) + [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
 
 assert HIDDEN_SIZE % 32 == 0
@@ -108,11 +111,17 @@ class BenchmarkRunner:
     def __call__(self, hidden_states, topk_weights, topk_ids):
         h = self.handles[self.iter_idx % self.num_handles]
         # 执行 forward（返回新 tensor，但 benchmark stmt 会丢弃返回值）
-        torch.ops.nanovllm.moe_forward(hidden_states, topk_ids, topk_weights, h)
+        result = torch.ops.nanovllm.moe_forward(hidden_states, topk_ids, topk_weights, h)
         self.iter_idx += 1
+        return result
 
     def reset(self):
         self.iter_idx = 0
+
+    def get_last_time_ms(self):
+        """Get the last run time from the most recently used handle."""
+        h = self.handles[(self.iter_idx - 1) % self.num_handles]
+        return h.get_last_run_time_ms()
 
 
 # =============================================================================
@@ -142,7 +151,7 @@ def main():
     runner = BenchmarkRunner(moe_handles)
 
     # ---- run benchmark ----
-    print("--- Performance Results ---")
+    print("--- Performance Results (using get_last_run_time_ms()) ---")
     header = (
         f"{'Num Tokens':<12} "
         f"{'ActiveE':<8} "
@@ -157,7 +166,7 @@ def main():
         # inputs on CPU
         hidden_states = torch.randn((num_tokens, HIDDEN_SIZE), dtype=torch.float16).contiguous()
 
-        # 构造一个“尽量均匀覆盖 expert”的 routing，避免 active_experts 偏小
+        # 构造一个"尽量均匀覆盖 expert"的 routing，避免 active_experts 偏小
         # shape: [T, K]
         ids = torch.empty((num_tokens, TOP_K), dtype=torch.int32)
         base = torch.arange(num_tokens, dtype=torch.int64) * TOP_K
@@ -171,14 +180,19 @@ def main():
         # bytes only from weights (unique experts)
         weight_bytes, active_e = get_weight_bytes_for_routing(ids)
 
+        # Warmup runs
+        for _ in range(WARMUP_RUNS):
+            runner(hidden_states, topk_w, ids)
+
+        # Benchmark runs with weight cycling
         runner.reset()
-        timer = benchmark.Timer(
-            stmt="runner(h, w, ids)",
-            globals={"runner": runner, "h": hidden_states, "w": topk_w, "ids": ids},
-        )
-        measurement = timer.blocked_autorange(min_run_time=MIN_RUN_TIME_S)
-        avg_time_s = measurement.mean
-        avg_time_ms = avg_time_s * 1000.0
+        total_time_ms = 0.0
+        for i in range(BENCHMARK_RUNS):
+            runner(hidden_states, topk_w, ids)
+            total_time_ms += runner.get_last_time_ms()
+
+        avg_time_ms = total_time_ms / BENCHMARK_RUNS
+        avg_time_s = avg_time_ms / 1000.0
 
         # throughput metrics
         bw_gb_s = (weight_bytes / 1e9) / avg_time_s

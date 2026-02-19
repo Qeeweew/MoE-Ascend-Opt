@@ -2,6 +2,7 @@
 #include "q8_gemm.h"
 #include "numa_threadpool.h"
 
+#include <chrono>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -242,6 +243,9 @@ void MoEInfer::execute_on_cpu_routed_from_pointers(
     int64_t top_k,
     at::ScalarType dtype) {
 
+    // Start timing
+    auto start = std::chrono::high_resolution_clock::now();
+
     // TORCH_CHECK(top_k == 1 || top_k == 8, "top_k must be 1 or 8");
 
     AT_DISPATCH_REDUCED_FLOATING_TYPES(
@@ -265,4 +269,9 @@ void MoEInfer::execute_on_cpu_routed_from_pointers(
             );
         }
     );
+
+    // End timing and store result in milliseconds
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> diff = end - start;
+    last_run_time_ms_ = diff.count();
 }
