@@ -663,9 +663,10 @@ struct ThreadWorkspace {
     float*  A_d_packed2 = nullptr;
     float*  temp_row_buffer = nullptr;
 
-    void ensure_size(int m_ceil, int k_hidden, int k_inter, int k_inter_x2) {
+    void ensure_size(int m_ceil, int k_hidden, int k_inter) {
         const int k_hidden_k_blocks = k_hidden / QK8_0;
         const int k_inter_k_blocks  = k_inter / QK8_0;
+        const int k_inter_x2 = k_inter * 2;
 
         const size_t size_A_qs1 = (size_t)m_ceil * k_hidden * sizeof(int8_t);
         const size_t size_A_d1  = (size_t)m_ceil * k_hidden_k_blocks * sizeof(float);
@@ -832,8 +833,7 @@ void moe_q8_forward_ptr_impl(
     TORCH_CHECK(tp_size >= 1, "tp_size must be >= 1");
     TORCH_CHECK(numa_available() != -1, "libnuma not available");
 
-    constexpr int H_CHUNK = 256;  // Chunk size for parallelizing hidden dimension
-    TORCH_CHECK(hidden_dim % H_CHUNK == 0, "hidden_dim must be a multiple of H_CHUNK (256), got ", hidden_dim);
+    // H_CHUNK removed - computation too small for chunking to be beneficial
 
     const int64_t intermediate_shard = intermediate_size / tp_size;
 
@@ -923,7 +923,7 @@ void moe_q8_forward_ptr_impl(
                     const int split_idx = idx % 2; // 0: First half (Gate), 1: Second half (Up)
                     
                     const MoeTask& task = global_tasks[task_idx];
-                    ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
+                    ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard);
 
                     const int exp_id = task.expert_id;
                     const int count = task.num_tokens; // Always 1
@@ -964,7 +964,7 @@ void moe_q8_forward_ptr_impl(
                     const int split_idx = idx % 2; // 0: First half of H, 1: Second half of H
                     
                     const MoeTask& task = global_tasks[task_idx];
-                    ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
+                    ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard);
 
                     const int exp_id = task.expert_id;
                     const int count = task.num_tokens; 
@@ -1014,7 +1014,7 @@ void moe_q8_forward_ptr_impl(
                     const MoeTask& task = global_tasks[task_idx];
                     
                     // Ensure TLS workspace
-                    ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard, (int)(2 * intermediate_shard));
+                    ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard);
 
                     const int exp_id = task.expert_id;
                     const int count = task.num_tokens;
@@ -1070,16 +1070,9 @@ void moe_q8_forward_ptr_impl(
             float* local_y_partial = pool_y_partial[tp];
             float* local_expert_out = pool_expert_out[tp];
 
-            // Split hidden_dim by H_CHUNK to increase parallelism for small batches
-            const int64_t num_chunks = hidden_dim / H_CHUNK;
-
-            exec->pool->parallel_for_static(0, num_tokens * num_chunks, [&](int64_t idx) {
-                const int64_t t = idx / num_chunks;
-                const int64_t chunk_idx = idx % num_chunks;
-                const int64_t h_offset = chunk_idx * H_CHUNK;
-
-                float* acc = local_y_partial + t * hidden_dim + h_offset;
-                std::memset(acc, 0, H_CHUNK * sizeof(float));
+            exec->pool->parallel_for_static(0, num_tokens, [&](int64_t t) {
+                float* acc = local_y_partial + t * hidden_dim;
+                std::memset(acc, 0, hidden_dim * sizeof(float));
 
                 for (int k = 0; k < (int)top_k; ++k) {
                     const int scatter_idx = (int)(t * top_k + k);
@@ -1087,9 +1080,9 @@ void moe_q8_forward_ptr_impl(
                     if (src_row_idx == -1) continue;
 
                     const float w = routing_weights_ptr[scatter_idx];
-                    const float* src_row = local_expert_out + (int64_t)src_row_idx * (int64_t)hidden_dim + h_offset;
+                    const float* src_row = local_expert_out + (int64_t)src_row_idx * (int64_t)hidden_dim;
 
-                    for (int j = 0; j < H_CHUNK; ++j) {
+                    for (int j = 0; j < (int)hidden_dim; ++j) {
                         acc[j] += w * src_row[j];
                     }
                 }
@@ -1105,27 +1098,20 @@ void moe_q8_forward_ptr_impl(
     PROFILE_STAGE_BEGIN(stage_c2);
     auto exec0 = nanovllm::NumaExecutorManager::get(0);
 
-    // Split hidden_dim by H_CHUNK to increase parallelism for small batches
-    const int64_t num_chunks = hidden_dim / H_CHUNK;
-
-    exec0->pool->parallel_for_static(0, num_tokens * num_chunks, [&](int64_t idx) {
-        const int64_t t = idx / num_chunks;
-        const int64_t chunk_idx = idx % num_chunks;
-        const int64_t h_offset = chunk_idx * H_CHUNK;
-
-        float* acc = pool_y_partial[0] + t * hidden_dim + h_offset;
+    exec0->pool->parallel_for_static(0, num_tokens, [&](int64_t t) {
+        float* acc = pool_y_partial[0] + t * hidden_dim;
 
         // Sum partials from other TP nodes
         for (int tp = 1; tp < (int)tp_size; ++tp) {
-            const float* src = pool_y_partial[tp] + t * hidden_dim + h_offset;
-            for (int j = 0; j < H_CHUNK; ++j) {
+            const float* src = pool_y_partial[tp] + t * hidden_dim;
+            for (int j = 0; j < (int)hidden_dim; ++j) {
                 acc[j] += src[j];
             }
         }
 
         // Cast to output type
-        T* dst = y_out_ptr + t * hidden_dim + h_offset;
-        for (int j = 0; j < H_CHUNK; ++j) {
+        T* dst = y_out_ptr + t * hidden_dim;
+        for (int j = 0; j < (int)hidden_dim; ++j) {
             dst[j] = (T)acc[j];
         }
     });

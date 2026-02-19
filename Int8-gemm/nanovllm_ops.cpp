@@ -317,6 +317,10 @@ TORCH_LIBRARY_FRAGMENT(nanovllm, m) {
                 const torch::Tensor& gate_up_qs, const torch::Tensor& gate_up_d,
                 const torch::Tensor& down_qs, const torch::Tensor& down_d) {
                  self->impl->store_quantized_weights_repack(gate_up_qs, gate_up_d, down_qs, down_d);
+             })
+        .def("get_last_run_time_ms",
+             [](const c10::intrusive_ptr<MoEInferHandle>& self) {
+                 return self->impl->get_last_run_time_ms();
              });
 
 #ifdef WITH_NPU

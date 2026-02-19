@@ -16,6 +16,9 @@ public:
     int64_t hidden_size() const { return hidden_size_; }
     int64_t intermediate_size() const { return intermediate_size_; }
 
+    // Get last forward execution time in milliseconds
+    double get_last_run_time_ms() const { return last_run_time_ms_; }
+
     // Online quantize & store (CPU float32 weight)
     void quantize_and_store_expert(
         int64_t expert_idx,
@@ -58,4 +61,7 @@ private:
     size_t gate_up_d_bytes_per_tp_  = 0;
     size_t down_qs_bytes_per_tp_    = 0;
     size_t down_d_bytes_per_tp_     = 0;
+
+    // Last forward execution time in milliseconds
+    double last_run_time_ms_ = 0.0;
 };

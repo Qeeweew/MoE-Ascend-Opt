@@ -25,8 +25,9 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include <cstring> 
+#include <cstring>
 #include <climits>
+#include <new>
 
 namespace nanovllm {
 
@@ -37,8 +38,6 @@ namespace detail {
 // -------------------------
 namespace FutexImpl {
     inline void wait(std::atomic<uint32_t>& atom, uint32_t expected) {
-        // FUTEX_WAIT_PRIVATE: Assuming threads share the same memory space (process)
-        // Check if value is still 'expected', if so, sleep.
         while (atom.load(std::memory_order_acquire) == expected) {
             syscall(SYS_futex, &atom, FUTEX_WAIT_PRIVATE, expected, NULL, NULL, 0);
         }
@@ -65,44 +64,75 @@ namespace FutexImpl {
 
 inline void bind_this_thread_to_node(int node) {
     (void)numa_run_on_node(node);
-
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
-
     struct bitmask* bm = numa_allocate_cpumask();
     numa_node_to_cpus(node, bm);
     for (int cpu = 0; cpu < (int)bm->size; ++cpu) {
         if (numa_bitmask_isbitset(bm, cpu)) CPU_SET(cpu, &cpuset);
     }
     numa_free_cpumask(bm);
-
     (void)pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 }
 
 inline int64_t read_env_int64(const char* name, int64_t def) {
     const char* s = std::getenv(name);
     if (!s || !*s) return def;
-
     errno = 0;
     char* end = nullptr;
     long long v = std::strtoll(s, &end, 10);
-    if (errno != 0 || end == s || *end != '\0') {
-        return def;
-    }
+    if (errno != 0 || end == s || *end != '\0') return def;
     return (int64_t)v;
 }
 
 } // namespace detail
 
 // -------------------------
-// NumaThreadPool (worker pool)
+// NumaThreadPool
 // -------------------------
 class NumaThreadPool {
 public:
     enum class Schedule { StaticBlock, Dynamic };
 
+    // 定义缓存行大小，通常为64字节
+    static constexpr size_t CACHE_LINE_SIZE = 64;
+
+    // 核心控制块：分配在目标 NUMA 节点上
+    struct alignas(CACHE_LINE_SIZE) ControlBlock {
+        // 使用 alignas 强制每个热点变量独占 Cache Line，避免 False Sharing
+        
+        // 1. Worker 等待的信号
+        alignas(CACHE_LINE_SIZE) std::atomic<uint32_t> gen_{0};
+        
+        // 2. 主线程等待的计数器
+        alignas(CACHE_LINE_SIZE) std::atomic<int> remaining_{0};
+        
+        // 3. 动态调度时的任务游标 (Worker 间高频竞争)
+        alignas(CACHE_LINE_SIZE) std::atomic<int64_t> next_{0};
+        
+        // 4. 停止信号
+        alignas(CACHE_LINE_SIZE) std::atomic<bool> stop_{false};
+
+        // 5. 任务参数 (主要是读，竞争少，但也隔离一下)
+        alignas(CACHE_LINE_SIZE) std::function<void(int64_t)> job_fn_;
+        int64_t begin_ = 0;
+        int64_t end_ = 0;
+        int64_t grain_ = 0;
+        Schedule sched_ = Schedule::StaticBlock;
+    };
+
     NumaThreadPool(int node, int num_threads)
-        : node_(node), stop_(false), num_threads_(std::max(1, num_threads)) {
+        : node_(node), num_threads_(std::max(1, num_threads)) {
+        
+        // 关键修改：在目标 NUMA 节点上分配控制块内存
+        // 这样 Worker 线程访问这些原子变量时，是访问的本地内存 (Local Access)
+        void* raw_mem = numa_alloc_onnode(sizeof(ControlBlock), node_);
+        if (!raw_mem) {
+            throw std::runtime_error("Failed to allocate memory on NUMA node " + std::to_string(node_));
+        }
+        // 使用 Placement New 初始化对象
+        cb_ = new (raw_mem) ControlBlock();
+
         workers_.reserve((size_t)num_threads_);
         for (int tid = 0; tid < num_threads_; ++tid) {
             workers_.emplace_back([this, tid]() { worker_loop(tid); });
@@ -110,27 +140,29 @@ public:
     }
 
     ~NumaThreadPool() {
-        stop_.store(true, std::memory_order_release);
-        // Bump generation to wake workers
-        gen_.fetch_add(1, std::memory_order_release);
-        // System call wake
-        detail::FutexImpl::notify_all(gen_);
+        cb_->stop_.store(true, std::memory_order_release);
+        cb_->gen_.fetch_add(1, std::memory_order_release);
+        detail::FutexImpl::notify_all(cb_->gen_);
         
         for (auto& t : workers_) {
             if (t.joinable()) t.join();
         }
+
+        // 手动析构并释放 NUMA 内存
+        cb_->~ControlBlock();
+        numa_free(cb_, sizeof(ControlBlock));
     }
 
     int node() const { return node_; }
 
     template <class F>
     void parallel_for(int64_t begin, int64_t end, F&& fn) {
-        parallel_for_impl(begin, end, Schedule::Dynamic, /*grain*/1, std::forward<F>(fn));
+        parallel_for_impl(begin, end, Schedule::Dynamic, 1, std::forward<F>(fn));
     }
 
     template <class F>
     void parallel_for_static(int64_t begin, int64_t end, F&& fn) {
-        parallel_for_impl(begin, end, Schedule::StaticBlock, /*grain*/0, std::forward<F>(fn));
+        parallel_for_impl(begin, end, Schedule::StaticBlock, 0, std::forward<F>(fn));
     }
 
     template <class F>
@@ -158,6 +190,11 @@ private:
     void parallel_for_impl(int64_t begin, int64_t end, Schedule sched, int64_t grain, F&& fn) {
         if (end <= begin) return;
 
+        if (end - begin == 1) {
+            fn(begin);
+            return;
+        }
+
         if (is_worker_thread()) {
             for (int64_t i = begin; i < end; ++i) fn(i);
             return;
@@ -166,26 +203,25 @@ private:
         std::function<void(int64_t)> fwrap = std::forward<F>(fn);
 
         {
+            // 此锁保护的是任务分发逻辑，只需简单的互斥
             std::lock_guard<std::mutex> lk(mu_dispatch_);
-            job_fn_ = std::move(fwrap);
-            begin_ = begin;
-            end_ = end;
-            sched_ = sched;
-            grain_ = (sched == Schedule::Dynamic ? std::max<int64_t>(1, grain) : 0);
-            next_.store(begin_, std::memory_order_relaxed);
             
-            // Set remaining count
-            remaining_.store(num_threads_, std::memory_order_release);
+            // 写入位于目标 NUMA 节点的控制块
+            cb_->job_fn_ = std::move(fwrap);
+            cb_->begin_ = begin;
+            cb_->end_ = end;
+            cb_->sched_ = sched;
+            cb_->grain_ = (sched == Schedule::Dynamic ? std::max<int64_t>(1, grain) : 0);
+            cb_->next_.store(begin, std::memory_order_relaxed);
             
-            // Update generation to wake workers
-            gen_.fetch_add(1, std::memory_order_release);
-            detail::FutexImpl::notify_all(gen_);
+            cb_->remaining_.store(num_threads_, std::memory_order_release);
+            
+            cb_->gen_.fetch_add(1, std::memory_order_release);
+            detail::FutexImpl::notify_all(cb_->gen_);
 
-            // Wait until remaining_ becomes 0
-            // Futex wait handles the loop
             int rem;
-            while ((rem = remaining_.load(std::memory_order_acquire)) > 0) {
-                detail::FutexImpl::wait(remaining_, rem);
+            while ((rem = cb_->remaining_.load(std::memory_order_acquire)) > 0) {
+                detail::FutexImpl::wait(cb_->remaining_, rem);
             }
         }
     }
@@ -195,28 +231,23 @@ private:
         tls_pool_ = this;
         tls_tid_ = tid;
 
-        // Change gen_ to uint32_t for futex compatibility
-        uint32_t my_gen = gen_.load(std::memory_order_acquire);
+        uint32_t my_gen = cb_->gen_.load(std::memory_order_acquire);
 
         while (true) {
-            // Wait for generation change
-            detail::FutexImpl::wait(gen_, my_gen);
+            detail::FutexImpl::wait(cb_->gen_, my_gen);
             
-            if (stop_.load(std::memory_order_acquire)) return;
+            if (cb_->stop_.load(std::memory_order_acquire)) return;
 
-            uint32_t current_gen = gen_.load(std::memory_order_acquire);
-            if (current_gen == my_gen) {
-                // Spurious wakeup
-                continue;
-            }
+            uint32_t current_gen = cb_->gen_.load(std::memory_order_acquire);
+            if (current_gen == my_gen) continue;
             my_gen = current_gen;
 
-            // Load job params
-            std::function<void(int64_t)> fn_local = job_fn_;
-            int64_t begin = begin_;
-            int64_t end = end_;
-            Schedule sched = sched_;
-            int64_t grain = grain_;
+            // 拷贝参数到本地栈
+            auto fn_local = cb_->job_fn_;
+            int64_t begin = cb_->begin_;
+            int64_t end = cb_->end_;
+            Schedule sched = cb_->sched_;
+            int64_t grain = cb_->grain_;
 
             if (sched == Schedule::StaticBlock) {
                 const int T = num_threads_;
@@ -227,40 +258,28 @@ private:
                 for (int64_t i = s; i < e; ++i) fn_local(i);
             } else {
                 while (true) {
-                    int64_t s = next_.fetch_add(grain, std::memory_order_relaxed);
+                    // 访问位于本地 NUMA 内存的原子变量，即使高频争抢也比跨节点快得多
+                    int64_t s = cb_->next_.fetch_add(grain, std::memory_order_relaxed);
                     if (s >= end) break;
                     int64_t e = std::min(end, s + grain);
                     for (int64_t i = s; i < e; ++i) fn_local(i);
                 }
             }
 
-            // Decrement remaining count
-            if (remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                // Last thread wakes up the submitter
-                detail::FutexImpl::notify_one(remaining_);
+            if (cb_->remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                detail::FutexImpl::notify_one(cb_->remaining_);
             }
         }
     }
 
 private:
     int node_;
-    std::atomic<bool> stop_;
     int num_threads_;
-
     std::vector<std::thread> workers_;
-    std::mutex mu_dispatch_;
+    std::mutex mu_dispatch_; // 本地锁，无需放到远端
 
-    // Use uint32_t for futex compatibility (linux futex is 32-bit)
-    std::atomic<uint32_t> gen_{0};
-    std::atomic<int> remaining_{0};
-
-    std::function<void(int64_t)> job_fn_;
-    int64_t begin_ = 0;
-    int64_t end_ = 0;
-    Schedule sched_ = Schedule::StaticBlock;
-    int64_t grain_ = 0;
-
-    std::atomic<int64_t> next_{0};
+    // 指向远端（或本地）NUMA 内存的指针
+    ControlBlock* cb_ = nullptr;
 
     static inline thread_local NumaThreadPool* tls_pool_ = nullptr;
     static inline thread_local int tls_tid_ = -1;
@@ -272,17 +291,32 @@ private:
 class NumaLauncher {
 public:
     using Job = std::function<void()>;
+    static constexpr size_t CACHE_LINE_SIZE = 64;
 
-    explicit NumaLauncher(int node) : node_(node), stop_(false) {
+    // 同样将 Launcher 的热点同步变量放在目标节点
+    struct alignas(CACHE_LINE_SIZE) LaunchState {
+        alignas(CACHE_LINE_SIZE) std::atomic<uint32_t> signal_{0};
+        alignas(CACHE_LINE_SIZE) std::atomic<bool> stop_{false};
+    };
+
+    explicit NumaLauncher(int node) : node_(node) {
+        // 在目标节点分配同步状态
+        void* raw = numa_alloc_onnode(sizeof(LaunchState), node_);
+        if (!raw) throw std::runtime_error("NumaLauncher alloc failed");
+        state_ = new (raw) LaunchState();
+
         th_ = std::thread([this]() { loop(); });
     }
 
     ~NumaLauncher() {
-        stop_.store(true, std::memory_order_release);
-        signal_.fetch_add(1, std::memory_order_release);
-        detail::FutexImpl::notify_one(signal_);
+        state_->stop_.store(true, std::memory_order_release);
+        state_->signal_.fetch_add(1, std::memory_order_release);
+        detail::FutexImpl::notify_one(state_->signal_);
         
         if (th_.joinable()) th_.join();
+
+        state_->~LaunchState();
+        numa_free(state_, sizeof(LaunchState));
     }
 
     int node() const { return node_; }
@@ -293,11 +327,14 @@ public:
         auto task_ptr = std::make_shared<std::packaged_task<R()>>(std::forward<F>(f));
         auto fut = task_ptr->get_future();
         {
+            // 锁保护队列，队列在内存中可能不在本地，但这不可避免
+            // 因为这是 Producer-Consumer 模型
             std::lock_guard<std::mutex> lk(mu_);
             q_.emplace_back([task_ptr]() { (*task_ptr)(); });
         }
-        signal_.fetch_add(1, std::memory_order_release);
-        detail::FutexImpl::notify_one(signal_);
+        // 通知信号位于消费者所在的 NUMA 节点
+        state_->signal_.fetch_add(1, std::memory_order_release);
+        detail::FutexImpl::notify_one(state_->signal_);
         return fut;
     }
 
@@ -305,7 +342,7 @@ private:
     void loop() {
         detail::bind_this_thread_to_node(node_);
 
-        uint32_t last_signal = signal_.load(std::memory_order_acquire);
+        uint32_t last_signal = state_->signal_.load(std::memory_order_acquire);
 
         while (true) {
             Job job;
@@ -317,7 +354,7 @@ private:
                     job = std::move(q_.front());
                     q_.pop_front();
                     has_job = true;
-                } else if (stop_.load(std::memory_order_acquire)) {
+                } else if (state_->stop_.load(std::memory_order_acquire)) {
                     return;
                 }
             }
@@ -325,23 +362,19 @@ private:
             if (has_job) {
                 job();
             } else {
-                // Wait for signal change using futex
-                detail::FutexImpl::wait(signal_, last_signal);
-                last_signal = signal_.load(std::memory_order_acquire);
+                detail::FutexImpl::wait(state_->signal_, last_signal);
+                last_signal = state_->signal_.load(std::memory_order_acquire);
             }
         }
     }
 
 private:
     int node_;
-    std::atomic<bool> stop_;
     std::mutex mu_;
     std::deque<Job> q_;
-    
-    // uint32_t for futex
-    std::atomic<uint32_t> signal_{0};
-    
     std::thread th_;
+
+    LaunchState* state_ = nullptr;
 };
 
 // -------------------------
