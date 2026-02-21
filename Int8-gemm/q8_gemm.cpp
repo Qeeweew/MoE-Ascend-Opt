@@ -170,10 +170,6 @@ static struct ProfilingCleanup {
 
 // ========================== End Profiling Macros ==========================
 
-#define QK8_0 32
-#define MR 4
-#define NR 8
-
 // ------------------------- q8 quant block (ARM NEON) -------------------------
 template<typename D_TYPE>
 static inline void quantize_block_q8_0(const float* x, D_TYPE* y_d, int8_t* y_qs) {
@@ -913,31 +909,34 @@ void moe_q8_forward_ptr_impl(
             });
 
             // --- Stage B: Expert Compute ---
-            if (num_tokens == 1) {
-                // Optimization for small batch: Split tasks to utilize threads better.
-                // Split GEMM1 (Gate+Up) into 2 parts per expert.
-                
-                // Phase 1: GEMM 1 Split
-                exec->pool->parallel_for(0, (int64_t)global_tasks.size() * 2, [&](int64_t idx) {
-                    const int task_idx = idx / 2;
-                    const int split_idx = idx % 2; // 0: First half (Gate), 1: Second half (Up)
-                    
+            const int pool_num_threads = exec->pool->num_threads();
+
+            if (global_tasks.size() * 2 <= (size_t)pool_num_threads) {
+                // Optimization: Direct thread-id based task assignment when tasks are few
+                // Each thread directly computes its assigned task based on thread ID
+                const int num_active_threads = (int)global_tasks.size() * 2;
+                exec->pool->execute_per_thread(num_active_threads, [&](int tid) {
+                    // Compute task assignment from thread ID
+                    const int task_idx = tid / 2;
+                    const int split_idx = tid % 2;  // 0: First half, 1: Second half
+
                     const MoeTask& task = global_tasks[task_idx];
                     ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard);
 
                     const int exp_id = task.expert_id;
-                    const int count = task.num_tokens; // Always 1
+                    const int count = task.num_tokens;
                     const int global_start_pos = task.global_token_start_pos;
 
                     const int64_t H = hidden_dim;
                     const int64_t Ish = intermediate_shard;
                     const int64_t H_BLK = H / QK8_0;
-                    
+
+                    // ============ Phase 1: GEMM 1 Split ============
                     // Weights Pointers (GateUp is 2*Ish cols. Split at Ish)
                     const int64_t col_offset = split_idx * Ish;
-                    const int8_t* gate_up_qs_ptr = gate_up_qs_tp[tp] + (int64_t)exp_id * (2 * Ish) * H 
+                    const int8_t* gate_up_qs_ptr = gate_up_qs_tp[tp] + (int64_t)exp_id * (2 * Ish) * H
                                                  + col_offset * H;
-                    const at::Half* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK 
+                    const at::Half* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK
                                                   + col_offset * H_BLK;
 
                     // Output buffer in shared memory (indexed by task_idx to avoid conflict)
@@ -956,27 +955,16 @@ void moe_q8_forward_ptr_impl(
                         gate_up_qs_ptr, reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
                         shared_inter_out, (int)(2 * Ish) // Stride is full width
                     );
-                });
 
-                // Phase 2: SiLU + GEMM 2 Split
-                exec->pool->parallel_for(0, (int64_t)global_tasks.size() * 2, [&](int64_t idx) {
-                    const int task_idx = idx / 2;
-                    const int split_idx = idx % 2; // 0: First half of H, 1: Second half of H
-                    
-                    const MoeTask& task = global_tasks[task_idx];
-                    ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard);
+                    // Barrier: Wait for all threads to complete Phase 1
+                    exec->pool->barrier();
 
-                    const int exp_id = task.expert_id;
-                    const int count = task.num_tokens; 
-                    const int global_start_pos = task.global_token_start_pos;
-
-                    const int64_t H = hidden_dim;
-                    const int64_t Ish = intermediate_shard;
+                    // ============ Phase 2: SiLU + GEMM 2 Split ============
                     const int64_t Ish_BLK = Ish / QK8_0;
 
                     // Read from shared intermediate
                     float* shared_inter_in = pool_expert_inter[tp] + (int64_t)task_idx * (2 * Ish);
-                    
+
                     // 3. Activation (SiLU) - Copy to local and execute (Redundant but lock-free)
                     std::memcpy(ws.expert_intermediate1, shared_inter_in, count * (2 * Ish) * sizeof(float));
                     silu_and_mul(ws.expert_intermediate1, count, (int)(2 * Ish));
@@ -991,15 +979,15 @@ void moe_q8_forward_ptr_impl(
                     // 5. GEMM 2 Partial (Split output dimension H)
                     const int64_t H_split = H / 2;
                     const int64_t N_chunk = (split_idx == 0) ? H_split : (H - H_split);
-                    const int64_t col_offset = split_idx * H_split;
+                    const int64_t col_offset2 = split_idx * H_split;
 
                     const int8_t* down_qs_ptr = down_proj_qs_tp[tp] + (int64_t)exp_id * H * Ish
-                                              + col_offset * Ish;
+                                              + col_offset2 * Ish;
                     const at::Half* down_d_ptr = down_proj_d_tp[tp] + (int64_t)exp_id * H * Ish_BLK
-                                               + col_offset * Ish_BLK;
+                                               + col_offset2 * Ish_BLK;
 
-                    float* out = pool_expert_out[tp] + (int64_t)global_start_pos * H + col_offset;
-                    
+                    float* out = pool_expert_out[tp] + (int64_t)global_start_pos * H + col_offset2;
+
                     gemm_q8_0_compute_packed(
                         count, (int)N_chunk, (int)Ish,
                         ws.A_qs_packed2, ws.A_d_packed2,

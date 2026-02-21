@@ -6,6 +6,10 @@
 
 std::vector<torch::Tensor> quantize_weight_only(torch::Tensor B_float);
 
+constexpr int QK8_0 = 32;
+constexpr int MR = 4;
+constexpr int NR = 8;
+
 template<typename D_TYPE>
 void repack_B_q8_0_from_ptr(
     int64_t N, int64_t K,
