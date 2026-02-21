@@ -246,8 +246,6 @@ void MoEInfer::execute_on_cpu_routed_from_pointers(
     // Start timing
     auto start = std::chrono::high_resolution_clock::now();
 
-    // TORCH_CHECK(top_k == 1 || top_k == 8, "top_k must be 1 or 8");
-
     AT_DISPATCH_REDUCED_FLOATING_TYPES(
         dtype, "moe_execute_routed_dispatch",
         [&] {
