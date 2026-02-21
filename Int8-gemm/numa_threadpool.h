@@ -92,7 +92,12 @@ inline int64_t read_env_int64(const char* name, int64_t def) {
 // -------------------------
 class NumaThreadPool {
 public:
-    enum class Schedule { StaticBlock, Dynamic };
+    // Unified execution mode: all modes are mutually exclusive
+    enum class ExecutionMode {
+        StaticBlock,  // Static block scheduling (parallel_for)
+        Dynamic,      // Dynamic scheduling (parallel_for with grain)
+        PerThread     // Direct thread-id based execution (execute_per_thread)
+    };
 
     // 定义缓存行大小，通常为64字节
     static constexpr size_t CACHE_LINE_SIZE = 64;
@@ -100,16 +105,16 @@ public:
     // 核心控制块：分配在目标 NUMA 节点上
     struct alignas(CACHE_LINE_SIZE) ControlBlock {
         // 使用 alignas 强制每个热点变量独占 Cache Line，避免 False Sharing
-        
+
         // 1. Worker 等待的信号
         alignas(CACHE_LINE_SIZE) std::atomic<uint32_t> gen_{0};
-        
+
         // 2. 主线程等待的计数器
         alignas(CACHE_LINE_SIZE) std::atomic<int> remaining_{0};
-        
+
         // 3. 动态调度时的任务游标 (Worker 间高频竞争)
         alignas(CACHE_LINE_SIZE) std::atomic<int64_t> next_{0};
-        
+
         // 4. 停止信号
         alignas(CACHE_LINE_SIZE) std::atomic<bool> stop_{false};
 
@@ -118,7 +123,15 @@ public:
         int64_t begin_ = 0;
         int64_t end_ = 0;
         int64_t grain_ = 0;
-        Schedule sched_ = Schedule::StaticBlock;
+        ExecutionMode mode_ = ExecutionMode::StaticBlock;
+
+        // 6. Per-thread execution function
+        alignas(CACHE_LINE_SIZE) std::function<void(int)> job_fn_per_thread_;
+        int active_threads_ = 0;  // Number of threads participating in execute_per_thread
+
+        // 7. Barrier support
+        alignas(CACHE_LINE_SIZE) std::atomic<uint32_t> barrier_phase_{0};
+        alignas(CACHE_LINE_SIZE) std::atomic<int> barrier_count_{0};
     };
 
     NumaThreadPool(int node, int num_threads)
@@ -154,20 +167,78 @@ public:
     }
 
     int node() const { return node_; }
+    int num_threads() const { return num_threads_; }
 
     template <class F>
     void parallel_for(int64_t begin, int64_t end, F&& fn) {
-        parallel_for_impl(begin, end, Schedule::Dynamic, 1, std::forward<F>(fn));
+        parallel_for_impl(begin, end, ExecutionMode::Dynamic, 1, std::forward<F>(fn));
     }
 
     template <class F>
     void parallel_for_static(int64_t begin, int64_t end, F&& fn) {
-        parallel_for_impl(begin, end, Schedule::StaticBlock, 0, std::forward<F>(fn));
+        parallel_for_impl(begin, end, ExecutionMode::StaticBlock, 0, std::forward<F>(fn));
     }
 
     template <class F>
     void parallel_for_dynamic(int64_t begin, int64_t end, int64_t grain, F&& fn) {
-        parallel_for_impl(begin, end, Schedule::Dynamic, grain, std::forward<F>(fn));
+        parallel_for_impl(begin, end, ExecutionMode::Dynamic, grain, std::forward<F>(fn));
+    }
+
+    template <class F>
+    void execute_per_thread(int num_threads, F&& fn) {
+        if (num_threads <= 0 || num_threads > num_threads_) {
+            throw std::runtime_error("Invalid num_threads: " + std::to_string(num_threads));
+        }
+
+        std::function<void(int)> fwrap = std::forward<F>(fn);
+
+        {
+            std::lock_guard<std::mutex> lk(mu_dispatch_);
+
+            cb_->job_fn_per_thread_ = std::move(fwrap);
+            cb_->active_threads_ = num_threads;
+            cb_->mode_ = ExecutionMode::PerThread;
+            cb_->barrier_phase_.store(0, std::memory_order_release);
+            cb_->barrier_count_.store(0, std::memory_order_release);
+
+            // All threads participate in the completion notification
+            cb_->remaining_.store(num_threads_, std::memory_order_release);
+
+            cb_->gen_.fetch_add(1, std::memory_order_release);
+            detail::FutexImpl::notify_all(cb_->gen_);
+
+            int rem;
+            while ((rem = cb_->remaining_.load(std::memory_order_acquire)) > 0) {
+                detail::FutexImpl::wait(cb_->remaining_, rem);
+            }
+
+            // Reset mode back to StaticBlock for subsequent calls
+            cb_->mode_ = ExecutionMode::StaticBlock;
+        }
+    }
+
+    // Simple barrier for synchronization within execute_per_thread
+    void barrier() {
+        int tid = tls_tid_;
+        if (tid < 0) return;  // Not a worker thread
+
+        // Check if this thread should participate in barrier
+        if (tid >= cb_->active_threads_) return;
+
+        uint32_t expected_phase = cb_->barrier_phase_.load(std::memory_order_acquire);
+        int count = cb_->barrier_count_.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+        if (count == cb_->active_threads_) {
+            // Last thread resets the counter and advances phase
+            cb_->barrier_count_.store(0, std::memory_order_release);
+            cb_->barrier_phase_.fetch_add(1, std::memory_order_release);
+            detail::FutexImpl::notify_all(cb_->barrier_phase_);
+        } else {
+            // Wait for phase to change
+            while (cb_->barrier_phase_.load(std::memory_order_acquire) == expected_phase) {
+                detail::FutexImpl::wait(cb_->barrier_phase_, expected_phase);
+            }
+        }
     }
 
     static int cpu_count_in_node(int node) {
@@ -187,7 +258,7 @@ private:
     }
 
     template <class F>
-    void parallel_for_impl(int64_t begin, int64_t end, Schedule sched, int64_t grain, F&& fn) {
+    void parallel_for_impl(int64_t begin, int64_t end, ExecutionMode mode, int64_t grain, F&& fn) {
         if (end <= begin) return;
 
         if (end - begin == 1) {
@@ -205,17 +276,17 @@ private:
         {
             // 此锁保护的是任务分发逻辑，只需简单的互斥
             std::lock_guard<std::mutex> lk(mu_dispatch_);
-            
+
             // 写入位于目标 NUMA 节点的控制块
             cb_->job_fn_ = std::move(fwrap);
             cb_->begin_ = begin;
             cb_->end_ = end;
-            cb_->sched_ = sched;
-            cb_->grain_ = (sched == Schedule::Dynamic ? std::max<int64_t>(1, grain) : 0);
+            cb_->grain_ = (mode == ExecutionMode::Dynamic ? std::max<int64_t>(1, grain) : 0);
             cb_->next_.store(begin, std::memory_order_relaxed);
-            
+            cb_->mode_ = mode;
+
             cb_->remaining_.store(num_threads_, std::memory_order_release);
-            
+
             cb_->gen_.fetch_add(1, std::memory_order_release);
             detail::FutexImpl::notify_all(cb_->gen_);
 
@@ -246,17 +317,35 @@ private:
             auto fn_local = cb_->job_fn_;
             int64_t begin = cb_->begin_;
             int64_t end = cb_->end_;
-            Schedule sched = cb_->sched_;
             int64_t grain = cb_->grain_;
+            ExecutionMode mode = cb_->mode_;
 
-            if (sched == Schedule::StaticBlock) {
+            // Special handling for PerThread mode: only active threads participate
+            if (mode == ExecutionMode::PerThread) {
+                if (tid < cb_->active_threads_) {
+                    // This thread is active, execute the function
+                    auto fn_per_thread_local = cb_->job_fn_per_thread_;
+                    fn_per_thread_local(tid);
+                    if (cb_->remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                        detail::FutexImpl::notify_one(cb_->remaining_);
+                    }
+                } else {
+                    // This thread is not active, skip execution but decrement remaining
+                    if (cb_->remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                        detail::FutexImpl::notify_one(cb_->remaining_);
+                    }
+                }
+                continue;
+            }
+
+            if (mode == ExecutionMode::StaticBlock) {
                 const int T = num_threads_;
                 const int64_t n = end - begin;
                 const int64_t chunk = (n + T - 1) / T;
                 const int64_t s = begin + (int64_t)tid * chunk;
                 const int64_t e = std::min(end, s + chunk);
                 for (int64_t i = s; i < e; ++i) fn_local(i);
-            } else {
+            } else {  // ExecutionMode::Dynamic
                 while (true) {
                     // 访问位于本地 NUMA 内存的原子变量，即使高频争抢也比跨节点快得多
                     int64_t s = cb_->next_.fetch_add(grain, std::memory_order_relaxed);
