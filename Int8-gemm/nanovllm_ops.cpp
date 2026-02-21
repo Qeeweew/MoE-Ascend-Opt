@@ -140,7 +140,7 @@ struct MoEGraphContext : torch::CustomClassHolder {
         : tokens_bucket(tokens_bucket_), top_k(top_k_) {
 
         dtype = (dtype_int == 0) ? at::kHalf : at::kBFloat16;
-        // TORCH_CHECK(top_k == 1 || top_k == 8);
+        TORCH_CHECK(top_k == 1 || top_k == 8 || top_k == 10);
         TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16);
 
         const int64_t H = moe_h->impl->hidden_size();
