@@ -21,8 +21,8 @@
 // ============================================================
 
 struct MoEInferHandle : torch::CustomClassHolder {
-    std::unique_ptr<MoEInfer> impl;
     quant::QuantType quant_type;
+    std::unique_ptr<MoEInfer> impl;
 
     // Constructor with quantization type (default: Q8_0 for backward compatibility)
     MoEInferHandle(int64_t E, int64_t H, int64_t I, int64_t quant_type_int = 0)

@@ -259,34 +259,45 @@ void gemm_q4_0_microkernel_specialized(
             int8x16_t a_vec_1 = vld1q_s8(a_ptr + 16); // Second 16 bytes (rows 0-3, second 4 K elements)
             a_ptr += 32;
 
-            // Load B: 16 bytes (contains 32 Q4 elements)
-            const uint8x16_t v0 = vld1q_u8(b_ptr);
-            b_ptr += 16;
+            // Load B: 32 bytes (NR=8 cols x 8 K-elements = 64 x 4-bit = 32 bytes)
+            uint8x16_t b_bytes_0 = vld1q_u8(b_ptr);      // Cols 0..3
+            uint8x16_t b_bytes_1 = vld1q_u8(b_ptr + 16); // Cols 4..7
+            b_ptr += 32;
 
-            // Unpack Q4 to two int8x16_t vectors
-            // Lower 4 bits: elements 0,4,8,12,16,20,24,28 (first K elements)
-            const int8x16_t v0l = vsubq_s8(
-                vreinterpretq_s8_u8(vandq_u8(v0, m4b)), s8b);
-            // Upper 4 bits: elements 1,5,9,13,17,21,25,29 (second K elements)
-            const int8x16_t v0h = vsubq_s8(
-                vreinterpretq_s8_u8(vshrq_n_u8(v0, 4)), s8b);
+            // Unpack B (cols 0..3): [q0,q4,q1,q5,q2,q6,q3,q7] format
+            // Lower nibble: q0,q1,q2,q3 -> maps to k=0..3
+            // Upper nibble: q4,q5,q6,q7 -> maps to k=4..7
+            int8x16_t b_v0_l = vsubq_s8(vreinterpretq_s8_u8(vandq_u8(b_bytes_0, m4b)), s8b);
+            int8x16_t b_v0_h = vsubq_s8(vreinterpretq_s8_u8(vshrq_n_u8(b_bytes_0, 4)), s8b);
 
-            // Dot products with corresponding A vectors
+            // Unpack B (cols 4..7)
+            int8x16_t b_v1_l = vsubq_s8(vreinterpretq_s8_u8(vandq_u8(b_bytes_1, m4b)), s8b);
+            int8x16_t b_v1_h = vsubq_s8(vreinterpretq_s8_u8(vshrq_n_u8(b_bytes_1, 4)), s8b);
+
+            // Dual FMA accumulation (Summing k=0..3 and k=4..7)
             if constexpr (MR_T > 0) {
-                sum_v[0][0] = vdotq_laneq_s32(sum_v[0][0], v0l, a_vec_0, 0);
-                sum_v[0][1] = vdotq_laneq_s32(sum_v[0][1], v0h, a_vec_1, 0);
+                sum_v[0][0] = vdotq_laneq_s32(sum_v[0][0], b_v0_l, a_vec_0, 0);
+                sum_v[0][1] = vdotq_laneq_s32(sum_v[0][1], b_v1_l, a_vec_0, 0);
+                sum_v[0][0] = vdotq_laneq_s32(sum_v[0][0], b_v0_h, a_vec_1, 0);
+                sum_v[0][1] = vdotq_laneq_s32(sum_v[0][1], b_v1_h, a_vec_1, 0);
             }
             if constexpr (MR_T > 1) {
-                sum_v[1][0] = vdotq_laneq_s32(sum_v[1][0], v0l, a_vec_0, 1);
-                sum_v[1][1] = vdotq_laneq_s32(sum_v[1][1], v0h, a_vec_1, 1);
+                sum_v[1][0] = vdotq_laneq_s32(sum_v[1][0], b_v0_l, a_vec_0, 1);
+                sum_v[1][1] = vdotq_laneq_s32(sum_v[1][1], b_v1_l, a_vec_0, 1);
+                sum_v[1][0] = vdotq_laneq_s32(sum_v[1][0], b_v0_h, a_vec_1, 1);
+                sum_v[1][1] = vdotq_laneq_s32(sum_v[1][1], b_v1_h, a_vec_1, 1);
             }
             if constexpr (MR_T > 2) {
-                sum_v[2][0] = vdotq_laneq_s32(sum_v[2][0], v0l, a_vec_0, 2);
-                sum_v[2][1] = vdotq_laneq_s32(sum_v[2][1], v0h, a_vec_1, 2);
+                sum_v[2][0] = vdotq_laneq_s32(sum_v[2][0], b_v0_l, a_vec_0, 2);
+                sum_v[2][1] = vdotq_laneq_s32(sum_v[2][1], b_v1_l, a_vec_0, 2);
+                sum_v[2][0] = vdotq_laneq_s32(sum_v[2][0], b_v0_h, a_vec_1, 2);
+                sum_v[2][1] = vdotq_laneq_s32(sum_v[2][1], b_v1_h, a_vec_1, 2);
             }
             if constexpr (MR_T > 3) {
-                sum_v[3][0] = vdotq_laneq_s32(sum_v[3][0], v0l, a_vec_0, 3);
-                sum_v[3][1] = vdotq_laneq_s32(sum_v[3][1], v0h, a_vec_1, 3);
+                sum_v[3][0] = vdotq_laneq_s32(sum_v[3][0], b_v0_l, a_vec_0, 3);
+                sum_v[3][1] = vdotq_laneq_s32(sum_v[3][1], b_v1_l, a_vec_0, 3);
+                sum_v[3][0] = vdotq_laneq_s32(sum_v[3][0], b_v0_h, a_vec_1, 3);
+                sum_v[3][1] = vdotq_laneq_s32(sum_v[3][1], b_v1_h, a_vec_1, 3);
             }
         }
 
@@ -494,12 +505,8 @@ void repack_B_q4_0(
     constexpr int NR = 8;
     const int K_BLOCKS = K / QK4_0;
 
-    // Q4_0 repack: treat as uint32_t blocks
-    // Each uint32_t contains 8 x 4-bit elements
-    // The repacking logic is similar to Q8_0 but with different element sizes
-
     for (int j = 0; j < N; j += NR) {
-        // Repack scales first
+        // 1. Repack scales
         for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
             for (int col = 0; col < NR; ++col) {
                 if (j + col < N) {
@@ -509,19 +516,18 @@ void repack_B_q4_0(
             }
         }
 
-        // Repack quantized values
-        // For Q4_0: src_qs and dest_qs_packed are both uint32_t*
-        // We copy in blocks of 4 bytes (one uint32_t) per element per K-block
+        // 2. Repack quantized values (uint32_t aware)
+        // Each K block has QK4_0 elements = 4 uint32_t blocks
         for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-            // Each K block has QK4_0 elements = 32 4-bit values = 16 bytes = 4 uint32_t
-            for (int col = 0; col < NR; ++col) {
-                if (j + col < N) {
-                    // Copy 4 uint32_t values (16 bytes) per column per K-block
-                    const uint32_t* src_ptr = src_qs + (j + col) * (K / 8) + k_block * 4;
-                    memcpy(dest_qs_packed, src_ptr, 4 * sizeof(uint32_t));
-                    dest_qs_packed += 4;
-                } else {
-                    dest_qs_packed += 4; // Skip for padding columns
+            for (int k_rem = 0; k_rem < QK4_0 / 8; ++k_rem) { // 4 iterations
+                for (int col = 0; col < NR; ++col) {
+                    if (j + col < N) {
+                        // (K / 8) is the stride because src_qs is uint32_t*
+                        dest_qs_packed[0] = src_qs[(j + col) * (K / 8) + k_block * 4 + k_rem];
+                    } else {
+                        dest_qs_packed[0] = 0;
+                    }
+                    dest_qs_packed++;
                 }
             }
         }
@@ -620,8 +626,8 @@ void gemm_q4_0_compute_packed(
                     K, M,
                     A_qs_packed,
                     A_d_packed,
-                    B_qs_packed + (jc + jr) * (K / 2), // Q4_0: half the storage
-                    B_d_packed_f16 + (jc + jr) * (K / QK4_0),
+                    B_qs_packed + (jc + jr) * K_BLOCKS * 16, // 16 = 4 uint32_t * 4 bytes
+                    B_d_packed_f16 + (jc + jr) * K_BLOCKS,
                     C + (jc + jr),
                     ldc,
                     false);
@@ -640,7 +646,7 @@ void gemm_q4_0_compute_packed(
                             kc_size, std::min(MR, M - ir),
                             A_qs_packed + (ir) * K + kc * MR,
                             A_d_packed + (ir) * K_BLOCKS + k_block_offset * MR,
-                            B_qs_packed + (jc + jr) * (K / 2) + (kc / 2) * NR,
+                            B_qs_packed + ((jc + jr) * K_BLOCKS + k_block_offset * NR) * 16,
                             B_d_packed_f16 + (jc + jr) * K_BLOCKS + k_block_offset * NR,
                             C + (ir) * ldc + (jc + jr), ldc, kc != 0);
                     }
