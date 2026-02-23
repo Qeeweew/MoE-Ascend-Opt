@@ -209,7 +209,7 @@ void gemm_q4_0_microkernel_specialized(
     int kc_size,
     const int8_t* A_qs_packed,
     const float* A_d_packed,
-    const uint8_t* B_qs_packed,
+    const uint32_t* B_qs_packed,
     const B_SCALE_TYPE* B_d_packed,
     float* C,
     int ldc,
@@ -236,7 +236,7 @@ void gemm_q4_0_microkernel_specialized(
     }
 
     const int8_t* a_ptr = A_qs_packed;
-    const uint8_t* b_ptr = B_qs_packed;
+    const uint32_t* b_ptr = B_qs_packed;
     const float* ad_ptr = A_d_packed;
     const B_SCALE_TYPE* bd_ptr = B_d_packed;
 
@@ -260,9 +260,9 @@ void gemm_q4_0_microkernel_specialized(
             a_ptr += 32;
 
             // Load B: 32 bytes (NR=8 cols x 8 K-elements = 64 x 4-bit = 32 bytes)
-            uint8x16_t b_bytes_0 = vld1q_u8(b_ptr);      // Cols 0..3
-            uint8x16_t b_bytes_1 = vld1q_u8(b_ptr + 16); // Cols 4..7
-            b_ptr += 32;
+            uint8x16_t b_bytes_0 = vld1q_u8(reinterpret_cast<const uint8_t*>(b_ptr)); // Cols 0..3
+            uint8x16_t b_bytes_1 = vld1q_u8(reinterpret_cast<const uint8_t*>(b_ptr + 4));
+            b_ptr += 8;
 
             // Unpack B (cols 0..3): [q0,q4,q1,q5,q2,q6,q3,q7] format
             // Lower nibble: q0,q1,q2,q3 -> maps to k=0..3
@@ -356,7 +356,7 @@ void gemm_q4_0_microkernel(
     int kc_size, int mr,
     const int8_t* A_qs_packed,
     const float* A_d_packed,
-    const uint8_t* B_qs_packed,
+    const uint32_t* B_qs_packed,
     const B_SCALE_TYPE* B_d_packed,
     float* C,
     int ldc,
@@ -372,8 +372,8 @@ void gemm_q4_0_microkernel(
 }
 
 // Template instantiations
-template void gemm_q4_0_microkernel<at::Half>(int, int, const int8_t*, const float*, const uint8_t*, const at::Half*, float*, int, bool);
-template void gemm_q4_0_microkernel<float>(int, int, const int8_t*, const float*, const uint8_t*, const float*, float*, int, bool);
+template void gemm_q4_0_microkernel<at::Half>(int, int, const int8_t*, const float*, const uint32_t*, const at::Half*, float*, int, bool);
+template void gemm_q4_0_microkernel<float>(int, int, const int8_t*, const float*, const uint32_t*, const float*, float*, int, bool);
 
 // ==================== Packing Functions ====================
 
@@ -603,7 +603,7 @@ void gemm_q4_0_compute_packed(
     int M, int N, int K,
     const int8_t* A_qs_packed,
     const float* A_d_packed,
-    const uint8_t* B_qs_packed,
+    const uint32_t* B_qs_packed,
     const at::Half* B_d_packed_f16,
     float* C,
     int ldc)
@@ -613,6 +613,12 @@ void gemm_q4_0_compute_packed(
     constexpr int NR = 8;
     constexpr int KC = 2048;
     constexpr int NC = 64;
+
+    constexpr int INT4_PER_UINT32 = 8;
+    // 1 个 K_BLOCK 在单列中占用的 uint32_t 数量 (32 / 8 = 4)
+    constexpr int UINT32_PER_K_BLOCK_COL = QK4_0 / INT4_PER_UINT32; 
+    // 1 个 K_BLOCK 在一个 NR 宏块中占用的 uint32_t 数量 (4 * NR)
+    constexpr int UINT32_PER_K_BLOCK_MACRO = UINT32_PER_K_BLOCK_COL * NR; 
 
     const int K_BLOCKS = K / QK4_0;
     const int num_nc_blocks = (N + NC - 1) / NC;
@@ -626,7 +632,7 @@ void gemm_q4_0_compute_packed(
                     K, M,
                     A_qs_packed,
                     A_d_packed,
-                    B_qs_packed + (jc + jr) * K_BLOCKS * 16, // 16 = 4 uint32_t * 4 bytes
+                    B_qs_packed + (jc + jr) * K_BLOCKS * UINT32_PER_K_BLOCK_COL, 
                     B_d_packed_f16 + (jc + jr) * K_BLOCKS,
                     C + (jc + jr),
                     ldc,
@@ -646,7 +652,8 @@ void gemm_q4_0_compute_packed(
                             kc_size, std::min(MR, M - ir),
                             A_qs_packed + (ir) * K + kc * MR,
                             A_d_packed + (ir) * K_BLOCKS + k_block_offset * MR,
-                            B_qs_packed + ((jc + jr) * K_BLOCKS + k_block_offset * NR) * 16,
+                            B_qs_packed + (jc + jr) * K_BLOCKS * UINT32_PER_K_BLOCK_COL 
+                                        + k_block_offset * UINT32_PER_K_BLOCK_MACRO,
                             B_d_packed_f16 + (jc + jr) * K_BLOCKS + k_block_offset * NR,
                             C + (ir) * ldc + (jc + jr), ldc, kc != 0);
                     }

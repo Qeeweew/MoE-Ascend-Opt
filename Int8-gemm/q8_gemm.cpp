@@ -414,8 +414,9 @@ void moe_forward_ptr_impl(
                     const StorageType* const* gate_up_qs_typed = reinterpret_cast<const StorageType* const*>(gate_up_qs_tp);
                     const StorageType* const* down_proj_qs_typed = reinterpret_cast<const StorageType* const*>(down_proj_qs_tp);
 
-                    const StorageType* gate_up_qs_ptr = gate_up_qs_typed[tp] + (int64_t)exp_id * (2 * Ish) * H / (QT == quant::QuantType::Q4_0 ? 2 : 1)
-                                                      + col_offset * H / (QT == quant::QuantType::Q4_0 ? 2 : 1);
+                    const StorageType* gate_up_qs_ptr = gate_up_qs_typed[tp] 
+                        + (int64_t)exp_id * (2 * Ish) * H / (QT == quant::QuantType::Q4_0 ? 8 : 1)
+                        + col_offset * H / (QT == quant::QuantType::Q4_0 ? 8 : 1);
                     const at::Half* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK
                                                       + col_offset * H_BLK;
 
@@ -433,16 +434,16 @@ void moe_forward_ptr_impl(
                         gemm::gemm_q8_0_compute_packed(
                             count, (int)Ish, (int)hidden_dim,
                             ws.A_qs_packed1, ws.A_d_packed1,
-                            reinterpret_cast<const int8_t*>(gate_up_qs_ptr),
-                            reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
+                            gate_up_qs_ptr,
+                            gate_up_d_ptr,
                             shared_inter_out, (int)(2 * Ish)
                         );
                     } else {
                         gemm::gemm_q4_0_compute_packed(
                             count, (int)Ish, (int)hidden_dim,
                             ws.A_qs_packed1, ws.A_d_packed1,
-                            reinterpret_cast<const uint8_t*>(gate_up_qs_ptr),
-                            reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
+                            gate_up_qs_ptr,
+                            gate_up_d_ptr,
                             shared_inter_out, (int)(2 * Ish)
                         );
                     }
@@ -466,8 +467,10 @@ void moe_forward_ptr_impl(
                     const int64_t N_chunk = (split_idx == 0) ? H_split : (H - H_split);
                     const int64_t col_offset2 = split_idx * H_split;
 
-                    const auto* down_qs_ptr = down_proj_qs_typed[tp] + (int64_t)exp_id * H * Ish / (QT == quant::QuantType::Q4_0 ? 2 : 1)
-                                                        + col_offset2 * Ish / (QT == quant::QuantType::Q4_0 ? 2 : 1);
+                    const StorageType* down_qs_ptr = down_proj_qs_typed[tp] 
+                        + (int64_t)exp_id * H * Ish / (QT == quant::QuantType::Q4_0 ? 8 : 1)
+                        + col_offset2 * Ish / (QT == quant::QuantType::Q4_0 ? 8 : 1);
+
                     const at::Half* down_d_ptr = down_proj_d_tp[tp] + (int64_t)exp_id * H * Ish_BLK
                                                         + col_offset2 * Ish_BLK;
 
@@ -486,7 +489,7 @@ void moe_forward_ptr_impl(
                         gemm::gemm_q4_0_compute_packed(
                             count, (int)N_chunk, (int)Ish,
                             ws.A_qs_packed2, ws.A_d_packed2,
-                            reinterpret_cast<const uint8_t*>(down_qs_ptr),
+                            reinterpret_cast<const uint32_t*>(down_qs_ptr),
                             reinterpret_cast<const ggml_half*>(down_d_ptr),
                             out, (int)H
                         );
@@ -523,9 +526,9 @@ void moe_forward_ptr_impl(
                     const StorageType* const* gate_up_qs_typed = reinterpret_cast<const StorageType* const*>(gate_up_qs_tp);
                     const StorageType* const* down_proj_qs_typed = reinterpret_cast<const StorageType* const*>(down_proj_qs_tp);
 
-                    const StorageType* gate_up_qs_ptr = gate_up_qs_typed[tp] + (int64_t)exp_id * (2 * Ish) * H / (QT == quant::QuantType::Q4_0 ? 2 : 1);
+                    const StorageType* gate_up_qs_ptr = gate_up_qs_typed[tp] + (int64_t)exp_id * (2 * Ish) * H / (QT == quant::QuantType::Q4_0 ? 8 : 1);
                     const at::Half* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK;
-                    const StorageType* down_qs_ptr = down_proj_qs_typed[tp] + (int64_t)exp_id * H * Ish / (QT == quant::QuantType::Q4_0 ? 2 : 1);
+                    const StorageType* down_qs_ptr = down_proj_qs_typed[tp] + (int64_t)exp_id * H * Ish / (QT == quant::QuantType::Q4_0 ? 8 : 1);
                     const at::Half* down_d_ptr = down_proj_d_tp[tp] + (int64_t)exp_id * H * Ish_BLK;
 
                     // 1. Pack A (Indirect)
@@ -548,7 +551,7 @@ void moe_forward_ptr_impl(
                         gemm::gemm_q4_0_compute_packed(
                             count, (int)(2 * intermediate_shard), (int)hidden_dim,
                             ws.A_qs_packed1, ws.A_d_packed1,
-                            reinterpret_cast<const uint8_t*>(gate_up_qs_ptr),
+                            gate_up_qs_ptr,
                             reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
                             ws.expert_intermediate1, (int)(2 * intermediate_shard)
                         );
@@ -578,7 +581,7 @@ void moe_forward_ptr_impl(
                         gemm::gemm_q4_0_compute_packed(
                             count, (int)hidden_dim, (int)intermediate_shard,
                             ws.A_qs_packed2, ws.A_d_packed2,
-                            reinterpret_cast<const uint8_t*>(down_qs_ptr),
+                            down_qs_ptr,
                             reinterpret_cast<const ggml_half*>(down_d_ptr),
                             out, (int)hidden_dim
                         );

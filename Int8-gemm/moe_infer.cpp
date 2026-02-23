@@ -45,9 +45,9 @@ MoEInfer::MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediat
     // Q4_0 uses half the storage of Q8_0 (2 elements per byte)
     if (quant_type_ == quant::QuantType::Q4_0) {
         gate_up_qs_bytes_per_tp_ =
-            (size_t)num_experts_ * (size_t)(2 * Ish) * (size_t)H * sizeof(uint8_t) / 2;
+            (size_t)num_experts_ * (size_t)(2 * Ish) * (size_t)H * sizeof(uint32_t) / 8;
         down_qs_bytes_per_tp_ =
-            (size_t)num_experts_ * (size_t)H * (size_t)Ish * sizeof(uint8_t) / 2;
+            (size_t)num_experts_ * (size_t)H * (size_t)Ish * sizeof(uint32_t) / 8;
     } else {
         gate_up_qs_bytes_per_tp_ =
             (size_t)num_experts_ * (size_t)(2 * Ish) * (size_t)H * sizeof(int8_t);
@@ -121,8 +121,8 @@ void MoEInfer::store_quantized_weights_repack(
     // Dispatch based on quantization type
     if (quant_type_ == quant::QuantType::Q4_0) {
         // Q4_0 path: weights are uint32_t (packed 4-bit)
-        TORCH_CHECK(gate_up_qs.scalar_type() == torch::kInt32, "Q4_0 gate_up_qs must be int32 (uint32 storage)");
-        TORCH_CHECK(down_proj_qs.scalar_type() == torch::kInt32, "Q4_0 down_proj_qs must be int32 (uint32 storage)");
+        TORCH_CHECK(gate_up_qs.scalar_type() == torch::kInt32 || gate_up_qs.scalar_type() ==  torch::kUInt32, "Q4_0 gate_up_qs must be int32 (uint32 storage)");
+        TORCH_CHECK(down_proj_qs.scalar_type() == torch::kInt32 || down_proj_qs.scalar_type() ==  torch::kUInt32, "Q4_0 down_proj_qs must be int32 (uint32 storage)");
 
         const uint32_t* src_gate_up_qs = gate_up_qs.data_ptr<uint32_t>();
         const at::Half*  src_gate_up_d  = (const at::Half*)gate_up_d.data_ptr<at::Half>();
@@ -132,35 +132,49 @@ void MoEInfer::store_quantized_weights_repack(
         // gate_up: shard on N (rows): [2I, H] -> tp blocks [2Ish, H]
         for (int64_t exp = 0; exp < num_experts_; ++exp) {
             for (int64_t tp = 0; tp < tp_size_; ++tp) {
-                const int64_t Nsh = 2 * Ish;
                 const int64_t K   = H;
 
-                const int64_t src_base_qs = exp * (2 * I * H / 2) + tp * (Nsh * K / 2); // Q4_0: half storage
-                const int64_t src_base_d  = exp * (2 * I * H_BLK) + tp * (Nsh * H_BLK);
+                // Base pointers for TP's local buffer
+                uint32_t* dst_qs = (uint32_t*)gate_up_qs_tp_[(size_t)tp] + exp * (2 * Ish * K / 8);
+                at::Half* dst_d  = gate_up_d_tp_[(size_t)tp]  + exp * (2 * Ish * H_BLK);
 
-                uint32_t* dst_qs = (uint32_t*)gate_up_qs_tp_[(size_t)tp] + exp * (Nsh * K / 2);
-                at::Half* dst_d  = gate_up_d_tp_[(size_t)tp]  + exp * (Nsh * H_BLK);
-
+                // 1) Repack the `gate` portion (N = Ish)
+                const int64_t gate_src_qs = exp * (2 * I * H / 8) + tp * (Ish * K / 8);
+                const int64_t gate_src_d  = exp * (2 * I * H_BLK) + tp * (Ish * H_BLK);
+                
                 gemm::repack_B_q4_0<at::Half>(
-                    Nsh, K,
-                    src_gate_up_qs + src_base_qs,
-                    src_gate_up_d  + src_base_d,
+                    Ish, K,
+                    src_gate_up_qs + gate_src_qs,
+                    src_gate_up_d  + gate_src_d,
                     dst_qs, dst_d
+                );
+
+                // 2) Repack the `up` portion (N = Ish)
+                // Offset source by I rows to reach the `up` matrix
+                const int64_t up_src_qs = exp * (2 * I * H / 8) + I * (K / 8) + tp * (Ish * K / 8);
+                const int64_t up_src_d  = exp * (2 * I * H_BLK) + I * H_BLK + tp * (Ish * H_BLK);
+                
+                gemm::repack_B_q4_0<at::Half>(
+                    Ish, K,
+                    src_gate_up_qs + up_src_qs,
+                    src_gate_up_d  + up_src_d,
+                    dst_qs + Ish * K / 8, // Shift destination by Ish rows
+                    dst_d  + Ish * H_BLK
                 );
             }
         }
 
         // down_proj: shard on K (cols): [H, I] -> tp blocks [H, Ish]
-        std::vector<uint32_t> tmp_qs((size_t)H * (size_t)Ish / 2); // Q4_0: half storage
+        std::vector<uint32_t> tmp_qs((size_t)H * (size_t)Ish / 8);
         std::vector<at::Half> tmp_d ((size_t)H * (size_t)Ish_BLK);
 
         for (int64_t exp = 0; exp < num_experts_; ++exp) {
             for (int64_t tp = 0; tp < tp_size_; ++tp) {
                 for (int64_t row = 0; row < H; ++row) {
-                    const int64_t src_row_qs_off = exp * (H * I / 2) + row * (I / 2) + tp * (Ish / 2);
-                    std::memcpy(tmp_qs.data() + row * (Ish / 2),
+                    const int64_t src_row_qs_off = exp * (H * I / 8) + row * (I / 8) + tp * (Ish / 8);
+                    std::memcpy(tmp_qs.data() + row * (Ish / 8),
                                 src_down_qs + src_row_qs_off,
-                                (size_t)(Ish / 2) * sizeof(uint32_t));
+                                (size_t)(Ish / 8) * sizeof(uint32_t));
 
                     const int64_t src_row_d_off = exp * (H * I_BLK) + row * I_BLK + tp * Ish_BLK;
                     std::memcpy(tmp_d.data() + row * Ish_BLK,
@@ -168,7 +182,7 @@ void MoEInfer::store_quantized_weights_repack(
                                 (size_t)Ish_BLK * sizeof(at::Half));
                 }
 
-                uint32_t* dst_qs = (uint32_t*)down_proj_qs_tp_[(size_t)tp] + exp * (H * Ish / 2);
+                uint32_t* dst_qs = (uint32_t*)down_proj_qs_tp_[(size_t)tp] + exp * (H * Ish / 8);
                 at::Half*  dst_d  = down_proj_d_tp_[(size_t)tp]  + exp * (H * Ish_BLK);
 
                 gemm::repack_B_q4_0<at::Half>(
@@ -191,20 +205,34 @@ void MoEInfer::store_quantized_weights_repack(
         // gate_up: shard on N (rows): [2I, H] -> tp blocks [2Ish, H]
         for (int64_t exp = 0; exp < num_experts_; ++exp) {
             for (int64_t tp = 0; tp < tp_size_; ++tp) {
-                const int64_t Nsh = 2 * Ish;
-                const int64_t K   = H;
+                const int64_t K = H;
 
-                const int64_t src_base_qs = exp * (2 * I * H) + tp * (Nsh * H);
-                const int64_t src_base_d  = exp * (2 * I * H_BLK) + tp * (Nsh * H_BLK);
+                // Base pointers for TP's local buffer
+                int8_t* dst_qs = gate_up_qs_tp_[(size_t)tp] + exp * (2 * Ish * K);
+                at::Half* dst_d  = gate_up_d_tp_[(size_t)tp]  + exp * (2 * Ish * H_BLK);
 
-                int8_t*   dst_qs = gate_up_qs_tp_[(size_t)tp] + exp * (Nsh * K);
-                at::Half* dst_d  = gate_up_d_tp_[(size_t)tp]  + exp * (Nsh * H_BLK);
+                // 1) Repack the `gate` portion (N = Ish)
+                const int64_t gate_src_qs = exp * (2 * I * H) + tp * (Ish * K);
+                const int64_t gate_src_d  = exp * (2 * I * H_BLK) + tp * (Ish * H_BLK);
 
                 gemm::repack_B_q8_0<at::Half>(
-                    Nsh, K,
-                    src_gate_up_qs + src_base_qs,
-                    src_gate_up_d  + src_base_d,
+                    Ish, K,
+                    src_gate_up_qs + gate_src_qs,
+                    src_gate_up_d  + gate_src_d,
                     dst_qs, dst_d
+                );
+
+                // 2) Repack the `up` portion (N = Ish)
+                // Offset source by I rows to reach the `up` matrix
+                const int64_t up_src_qs = exp * (2 * I * H) + I * K + tp * (Ish * K);
+                const int64_t up_src_d  = exp * (2 * I * H_BLK) + I * H_BLK + tp * (Ish * H_BLK);
+
+                gemm::repack_B_q8_0<at::Half>(
+                    Ish, K,
+                    src_gate_up_qs + up_src_qs,
+                    src_gate_up_d  + up_src_d,
+                    dst_qs + Ish * K, // Shift destination by Ish rows
+                    dst_d  + Ish * H_BLK
                 );
             }
         }
