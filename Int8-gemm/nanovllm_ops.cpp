@@ -3,6 +3,7 @@
 #include <torch/custom_class.h>
 
 #include "moe_infer.h"
+#include "quant_traits.h"
 
 #include <atomic>
 #include <cstdint>
@@ -21,8 +22,17 @@
 
 struct MoEInferHandle : torch::CustomClassHolder {
     std::unique_ptr<MoEInfer> impl;
-    MoEInferHandle(int64_t E, int64_t H, int64_t I)
-        : impl(std::make_unique<MoEInfer>(E, H, I)) {}
+    quant::QuantType quant_type;
+
+    // Constructor with quantization type (default: Q8_0 for backward compatibility)
+    MoEInferHandle(int64_t E, int64_t H, int64_t I, int64_t quant_type_int = 0)
+        : quant_type(static_cast<quant::QuantType>(quant_type_int)),
+          impl(std::make_unique<MoEInfer>(E, H, I, quant_type)) {}
+
+    // Helper to get quantization type as string
+    std::string get_quant_type() const {
+        return (quant_type == quant::QuantType::Q4_0) ? "Q4_0" : "Q8_0";
+    }
 };
 
 #ifdef WITH_NPU
@@ -304,12 +314,19 @@ static void moe_forward_npu_graph_out(
 
 TORCH_LIBRARY_FRAGMENT(nanovllm, m) {
     m.class_<MoEInferHandle>("MoEInfer")
-        .def(torch::init<int64_t,int64_t,int64_t>())
+        // Main constructor with quantization type support
+        // quant_type: 0 = Q8_0 (default), 1 = Q4_0
+        .def(torch::init<int64_t,int64_t,int64_t,int64_t>())
         .def("quantize_and_store_expert",
              [](const c10::intrusive_ptr<MoEInferHandle>& self,
                 int64_t expert_idx,
                 const std::string& proj_name,
                 const torch::Tensor& w) {
+                 // Q4_0 does not support online quantization
+                 if (self->quant_type == quant::QuantType::Q4_0) {
+                     TORCH_CHECK(false, "Q4_0 does not support online quantization. "
+                                     "Use store_quantized_repack() with pre-quantized weights.");
+                 }
                  self->impl->quantize_and_store_expert(expert_idx, proj_name, w);
              })
         .def("store_quantized_repack",
@@ -321,6 +338,22 @@ TORCH_LIBRARY_FRAGMENT(nanovllm, m) {
         .def("get_last_run_time_ms",
              [](const c10::intrusive_ptr<MoEInferHandle>& self) {
                  return self->impl->get_last_run_time_ms();
+             })
+        .def("get_quant_type",
+             [](const c10::intrusive_ptr<MoEInferHandle>& self) {
+                 return self->get_quant_type();
+             })
+        .def("get_num_experts",
+             [](const c10::intrusive_ptr<MoEInferHandle>& self) {
+                 return self->impl->num_experts();
+             })
+        .def("get_hidden_size",
+             [](const c10::intrusive_ptr<MoEInferHandle>& self) {
+                 return self->impl->hidden_size();
+             })
+        .def("get_intermediate_size",
+             [](const c10::intrusive_ptr<MoEInferHandle>& self) {
+                 return self->impl->intermediate_size();
              });
 
 #ifdef WITH_NPU

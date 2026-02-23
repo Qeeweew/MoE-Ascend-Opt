@@ -3,10 +3,12 @@
 #include <cstdint>
 #include <string>
 #include "numa_threadpool.h"
+#include "quant_traits.h"
 
 class MoEInfer {
 public:
-    MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediate_size);
+    MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediate_size,
+             quant::QuantType quant_type = quant::QuantType::Q8_0);
     ~MoEInfer();
 
     MoEInfer(const MoEInfer&) = delete;
@@ -47,11 +49,13 @@ private:
     int64_t intermediate_size_;
     int64_t tp_size_;
     int64_t intermediate_shard_;
+    quant::QuantType quant_type_;
 
     // Weights placed per-tp NUMA node
     // Layout per tp:
     // gate_up: [E, 2*Ish, H]
     // down:    [E, H, Ish]
+    // For Q4_0, stored as uint32_t (packed 4-bit)
     std::vector<int8_t*>   gate_up_qs_tp_;
     std::vector<at::Half*> gate_up_d_tp_;
     std::vector<int8_t*>   down_proj_qs_tp_;
@@ -64,4 +68,7 @@ private:
 
     // Last forward execution time in milliseconds
     double last_run_time_ms_ = 0.0;
+
+    // Helper to calculate quantized storage bytes
+    size_t calculate_qs_bytes(int64_t rows, int64_t cols) const;
 };
