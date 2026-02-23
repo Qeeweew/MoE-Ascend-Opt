@@ -272,7 +272,8 @@ using moe::preprocess_moe_routing;
 // Template function that works for both Q8_0 and Q4_0
 // QT: QuantType (Q8_0 or Q4_0)
 // T: data type (at::Half or at::BFloat16)
-template <quant::QuantType QT, typename T>
+// B_SCALE_TYPE: scale type (at::Half or at::BFloat16)
+template <quant::QuantType QT, typename T, typename B_SCALE_TYPE>
 void moe_forward_ptr_impl(
     const T* x_in_ptr,
     T* y_out_ptr,
@@ -280,9 +281,9 @@ void moe_forward_ptr_impl(
     const int32_t* selected_experts_ptr,
 
     const void* const* gate_up_qs_tp,
-    const at::Half* const* gate_up_d_tp,
+    const B_SCALE_TYPE* const* gate_up_d_tp,
     const void* const* down_proj_qs_tp,
-    const at::Half* const* down_proj_d_tp,
+    const B_SCALE_TYPE* const* down_proj_d_tp,
 
     int64_t num_tokens, int64_t hidden_dim, int64_t num_experts,
     int64_t intermediate_size,
@@ -414,10 +415,10 @@ void moe_forward_ptr_impl(
                     const StorageType* const* gate_up_qs_typed = reinterpret_cast<const StorageType* const*>(gate_up_qs_tp);
                     const StorageType* const* down_proj_qs_typed = reinterpret_cast<const StorageType* const*>(down_proj_qs_tp);
 
-                    const StorageType* gate_up_qs_ptr = gate_up_qs_typed[tp] 
+                    const StorageType* gate_up_qs_ptr = gate_up_qs_typed[tp]
                         + (int64_t)exp_id * (2 * Ish) * H / (QT == quant::QuantType::Q4_0 ? 8 : 1)
                         + col_offset * H / (QT == quant::QuantType::Q4_0 ? 8 : 1);
-                    const at::Half* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK
+                    const B_SCALE_TYPE* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK
                                                       + col_offset * H_BLK;
 
                     float* shared_inter_out = pool_expert_inter[tp] + (int64_t)task_idx * (2 * Ish) + col_offset;
@@ -471,7 +472,7 @@ void moe_forward_ptr_impl(
                         + (int64_t)exp_id * H * Ish / (QT == quant::QuantType::Q4_0 ? 8 : 1)
                         + col_offset2 * Ish / (QT == quant::QuantType::Q4_0 ? 8 : 1);
 
-                    const at::Half* down_d_ptr = down_proj_d_tp[tp] + (int64_t)exp_id * H * Ish_BLK
+                    const B_SCALE_TYPE* down_d_ptr = down_proj_d_tp[tp] + (int64_t)exp_id * H * Ish_BLK
                                                         + col_offset2 * Ish_BLK;
 
                     float* out = pool_expert_out[tp] + (int64_t)global_start_pos * H + col_offset2;
@@ -482,7 +483,7 @@ void moe_forward_ptr_impl(
                             count, (int)N_chunk, (int)Ish,
                             ws.A_qs_packed2, ws.A_d_packed2,
                             reinterpret_cast<const int8_t*>(down_qs_ptr),
-                            reinterpret_cast<const ggml_half*>(down_d_ptr),
+                            down_d_ptr,
                             out, (int)H
                         );
                     } else {
@@ -490,7 +491,7 @@ void moe_forward_ptr_impl(
                             count, (int)N_chunk, (int)Ish,
                             ws.A_qs_packed2, ws.A_d_packed2,
                             reinterpret_cast<const uint32_t*>(down_qs_ptr),
-                            reinterpret_cast<const ggml_half*>(down_d_ptr),
+                            down_d_ptr,
                             out, (int)H
                         );
                     }
@@ -527,9 +528,9 @@ void moe_forward_ptr_impl(
                     const StorageType* const* down_proj_qs_typed = reinterpret_cast<const StorageType* const*>(down_proj_qs_tp);
 
                     const StorageType* gate_up_qs_ptr = gate_up_qs_typed[tp] + (int64_t)exp_id * (2 * Ish) * H / (QT == quant::QuantType::Q4_0 ? 8 : 1);
-                    const at::Half* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK;
+                    const B_SCALE_TYPE* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK;
                     const StorageType* down_qs_ptr = down_proj_qs_typed[tp] + (int64_t)exp_id * H * Ish / (QT == quant::QuantType::Q4_0 ? 8 : 1);
-                    const at::Half* down_d_ptr = down_proj_d_tp[tp] + (int64_t)exp_id * H * Ish_BLK;
+                    const B_SCALE_TYPE* down_d_ptr = down_proj_d_tp[tp] + (int64_t)exp_id * H * Ish_BLK;
 
                     // 1. Pack A (Indirect)
                     gemm::pack_A_q8_0_from_quantized_indirect(
@@ -544,7 +545,7 @@ void moe_forward_ptr_impl(
                             count, (int)(2 * intermediate_shard), (int)hidden_dim,
                             ws.A_qs_packed1, ws.A_d_packed1,
                             reinterpret_cast<const int8_t*>(gate_up_qs_ptr),
-                            reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
+                            gate_up_d_ptr,
                             ws.expert_intermediate1, (int)(2 * intermediate_shard)
                         );
                     } else {
@@ -552,7 +553,7 @@ void moe_forward_ptr_impl(
                             count, (int)(2 * intermediate_shard), (int)hidden_dim,
                             ws.A_qs_packed1, ws.A_d_packed1,
                             gate_up_qs_ptr,
-                            reinterpret_cast<const ggml_half*>(gate_up_d_ptr),
+                            gate_up_d_ptr,
                             ws.expert_intermediate1, (int)(2 * intermediate_shard)
                         );
                     }
@@ -574,7 +575,7 @@ void moe_forward_ptr_impl(
                             count, (int)hidden_dim, (int)intermediate_shard,
                             ws.A_qs_packed2, ws.A_d_packed2,
                             reinterpret_cast<const int8_t*>(down_qs_ptr),
-                            reinterpret_cast<const ggml_half*>(down_d_ptr),
+                            down_d_ptr,
                             out, (int)hidden_dim
                         );
                     } else {
@@ -582,7 +583,7 @@ void moe_forward_ptr_impl(
                             count, (int)hidden_dim, (int)intermediate_shard,
                             ws.A_qs_packed2, ws.A_d_packed2,
                             down_qs_ptr,
-                            reinterpret_cast<const ggml_half*>(down_d_ptr),
+                            down_d_ptr,
                             out, (int)hidden_dim
                         );
                     }
@@ -645,30 +646,62 @@ void moe_forward_ptr_impl(
 }
 
 // Template instantiations for unified moe_forward_ptr_impl
-template void moe_forward_ptr_impl<quant::QuantType::Q8_0, at::Half>(
+// Q8_0 with FP16 scales
+template void moe_forward_ptr_impl<quant::QuantType::Q8_0, at::Half, at::Half>(
     const at::Half*, at::Half*,
     const float*, const int32_t*,
     const void* const*, const at::Half* const*,
     const void* const*, const at::Half* const*,
     int64_t,int64_t,int64_t,int64_t,int64_t,int64_t);
 
-template void moe_forward_ptr_impl<quant::QuantType::Q8_0, at::BFloat16>(
+template void moe_forward_ptr_impl<quant::QuantType::Q8_0, at::BFloat16, at::Half>(
     const at::BFloat16*, at::BFloat16*,
     const float*, const int32_t*,
     const void* const*, const at::Half* const*,
     const void* const*, const at::Half* const*,
     int64_t,int64_t,int64_t,int64_t,int64_t,int64_t);
 
-template void moe_forward_ptr_impl<quant::QuantType::Q4_0, at::Half>(
+// Q8_0 with BF16 scales
+template void moe_forward_ptr_impl<quant::QuantType::Q8_0, at::Half, at::BFloat16>(
+    const at::Half*, at::Half*,
+    const float*, const int32_t*,
+    const void* const*, const at::BFloat16* const*,
+    const void* const*, const at::BFloat16* const*,
+    int64_t,int64_t,int64_t,int64_t,int64_t,int64_t);
+
+template void moe_forward_ptr_impl<quant::QuantType::Q8_0, at::BFloat16, at::BFloat16>(
+    const at::BFloat16*, at::BFloat16*,
+    const float*, const int32_t*,
+    const void* const*, const at::BFloat16* const*,
+    const void* const*, const at::BFloat16* const*,
+    int64_t,int64_t,int64_t,int64_t,int64_t,int64_t);
+
+// Q4_0 with FP16 scales
+template void moe_forward_ptr_impl<quant::QuantType::Q4_0, at::Half, at::Half>(
     const at::Half*, at::Half*,
     const float*, const int32_t*,
     const void* const*, const at::Half* const*,
     const void* const*, const at::Half* const*,
     int64_t,int64_t,int64_t,int64_t,int64_t,int64_t);
 
-template void moe_forward_ptr_impl<quant::QuantType::Q4_0, at::BFloat16>(
+template void moe_forward_ptr_impl<quant::QuantType::Q4_0, at::BFloat16, at::Half>(
     const at::BFloat16*, at::BFloat16*,
     const float*, const int32_t*,
     const void* const*, const at::Half* const*,
     const void* const*, const at::Half* const*,
+    int64_t,int64_t,int64_t,int64_t,int64_t,int64_t);
+
+// Q4_0 with BF16 scales
+template void moe_forward_ptr_impl<quant::QuantType::Q4_0, at::Half, at::BFloat16>(
+    const at::Half*, at::Half*,
+    const float*, const int32_t*,
+    const void* const*, const at::BFloat16* const*,
+    const void* const*, const at::BFloat16* const*,
+    int64_t,int64_t,int64_t,int64_t,int64_t,int64_t);
+
+template void moe_forward_ptr_impl<quant::QuantType::Q4_0, at::BFloat16, at::BFloat16>(
+    const at::BFloat16*, at::BFloat16*,
+    const float*, const int32_t*,
+    const void* const*, const at::BFloat16* const*,
+    const void* const*, const at::BFloat16* const*,
     int64_t,int64_t,int64_t,int64_t,int64_t,int64_t);

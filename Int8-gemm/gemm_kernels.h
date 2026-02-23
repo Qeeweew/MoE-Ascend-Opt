@@ -108,22 +108,24 @@ void pack_A_q8_0_from_quantized_indirect(
 // ==================== GEMM Compute ====================
 
 // Main GEMM computation function (Q8_0)
+template<typename B_SCALE_TYPE>
 void gemm_q8_0_compute_packed(
     int M, int N, int K,
     const int8_t* A_qs_packed,
     const float* A_d_packed,
     const int8_t* B_qs_packed,
-    const at::Half* B_d_packed_f16,
+    const B_SCALE_TYPE* B_d_packed,
     float* C,
     int ldc);
 
 // Main GEMM computation function (Q4_0)
+template<typename B_SCALE_TYPE>
 void gemm_q4_0_compute_packed(
     int M, int N, int K,
     const int8_t* A_qs_packed,
     const float* A_d_packed,
     const uint32_t* B_qs_packed,
-    const at::Half* B_d_packed_f16,
+    const B_SCALE_TYPE* B_d_packed,
     float* C,
     int ldc);
 

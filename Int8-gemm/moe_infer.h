@@ -21,6 +21,9 @@ public:
     // Get last forward execution time in milliseconds
     double get_last_run_time_ms() const { return last_run_time_ms_; }
 
+    // Get the scale dtype (kFloat16 or kBFloat16)
+    at::ScalarType get_scale_dtype() const { return scale_dtype_; }
+
     // Online quantize & store (CPU float32 weight)
     void quantize_and_store_expert(
         int64_t expert_idx,
@@ -50,6 +53,7 @@ private:
     int64_t tp_size_;
     int64_t intermediate_shard_;
     quant::QuantType quant_type_;
+    at::ScalarType scale_dtype_ = at::kHalf;  // kHalf or kBFloat16
 
     // Weights placed per-tp NUMA node
     // Layout per tp:
@@ -57,9 +61,9 @@ private:
     // down:    [E, H, Ish]
     // For Q4_0, stored as uint32_t (packed 4-bit)
     std::vector<int8_t*>   gate_up_qs_tp_;
-    std::vector<at::Half*> gate_up_d_tp_;
+    std::vector<uint16_t*> gate_up_d_tp_;
     std::vector<int8_t*>   down_proj_qs_tp_;
-    std::vector<at::Half*> down_proj_d_tp_;
+    std::vector<uint16_t*> down_proj_d_tp_;
 
     size_t gate_up_qs_bytes_per_tp_ = 0;
     size_t gate_up_d_bytes_per_tp_  = 0;

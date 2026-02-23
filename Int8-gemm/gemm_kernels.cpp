@@ -133,10 +133,17 @@ void gemm_q8_0_microkernel_specialized(
         }
 
         float32x4_t d_b_v0, d_b_v1;
-        if constexpr (std::is_same_v<B_SCALE_TYPE, float>) {
-            d_b_v0 = vld1q_f32(bd_ptr);
-            d_b_v1 = vld1q_f32(bd_ptr + 4);
+        if constexpr (std::is_same_v<B_SCALE_TYPE, at::BFloat16>) {
+            // BF16 path: use bit manipulation for fast conversion
+            uint16x8_t bf16_vec = vld1q_u16(reinterpret_cast<const uint16_t*>(bd_ptr));
+            // Split into low and high halves
+            uint16x4_t low_half = vget_low_u16(bf16_vec);
+            uint16x4_t high_half = vget_high_u16(bf16_vec);
+            // Shift left by 16 
+            d_b_v0 = vreinterpretq_f32_u32(vshll_n_u16(low_half, 16));
+            d_b_v1 = vreinterpretq_f32_u32(vshll_n_u16(high_half, 16));
         } else {
+            // FP16 path
             float16x8_t b_scales_f16 = vld1q_f16((const __fp16 *) bd_ptr);
             d_b_v0 = vcvt_f32_f16(vget_low_f16(b_scales_f16));
             d_b_v1 = vcvt_f32_f16(vget_high_f16(b_scales_f16));
@@ -200,7 +207,7 @@ void gemm_q8_0_microkernel(
 
 // Template instantiations
 template void gemm_q8_0_microkernel<at::Half>(int, int, const int8_t*, const float*, const int8_t*, const at::Half*, float*, int, bool);
-template void gemm_q8_0_microkernel<float>(int, int, const int8_t*, const float*, const int8_t*, const float*, float*, int, bool);
+template void gemm_q8_0_microkernel<at::BFloat16>(int, int, const int8_t*, const float*, const int8_t*, const at::BFloat16*, float*, int, bool);
 
 // ==================== Q4_0 Microkernel ====================
 
@@ -303,10 +310,17 @@ void gemm_q4_0_microkernel_specialized(
 
         // Load B scales
         float32x4_t d_b_v0, d_b_v1;
-        if constexpr (std::is_same_v<B_SCALE_TYPE, float>) {
-            d_b_v0 = vld1q_f32(bd_ptr);
-            d_b_v1 = vld1q_f32(bd_ptr + 4);
+        if constexpr (std::is_same_v<B_SCALE_TYPE, at::BFloat16>) {
+            // Fast BF16 to FP32 conversion using NEON bit operations
+            uint16x8_t bf16_vec = vld1q_u16(reinterpret_cast<const uint16_t*>(bd_ptr));
+            // Split into low and high halves
+            uint16x4_t low_half = vget_low_u16(bf16_vec);
+            uint16x4_t high_half = vget_high_u16(bf16_vec);
+            // Shift left by 16 
+            d_b_v0 = vreinterpretq_f32_u32(vshll_n_u16(low_half, 16));
+            d_b_v1 = vreinterpretq_f32_u32(vshll_n_u16(high_half, 16));
         } else {
+            // FP16 path
             float16x8_t b_scales_f16 = vld1q_f16((const __fp16 *) bd_ptr);
             d_b_v0 = vcvt_f32_f16(vget_low_f16(b_scales_f16));
             d_b_v1 = vcvt_f32_f16(vget_high_f16(b_scales_f16));
@@ -373,7 +387,7 @@ void gemm_q4_0_microkernel(
 
 // Template instantiations
 template void gemm_q4_0_microkernel<at::Half>(int, int, const int8_t*, const float*, const uint32_t*, const at::Half*, float*, int, bool);
-template void gemm_q4_0_microkernel<float>(int, int, const int8_t*, const float*, const uint32_t*, const float*, float*, int, bool);
+template void gemm_q4_0_microkernel<at::BFloat16>(int, int, const int8_t*, const float*, const uint32_t*, const at::BFloat16*, float*, int, bool);
 
 // ==================== Packing Functions ====================
 
@@ -535,19 +549,21 @@ void repack_B_q4_0(
 }
 
 // Template instantiations
-template void repack_B_q8_0<at::Half>(int64_t, int64_t, const int8_t*, const at::Half*, int8_t*, at::Half*);
+// uint16_t for FP16/BF16, float for FP32
 template void repack_B_q8_0<float>(int64_t, int64_t, const int8_t*, const float*, int8_t*, float*);
-template void repack_B_q4_0<at::Half>(int64_t, int64_t, const uint32_t*, const at::Half*, uint32_t*, at::Half*);
+template void repack_B_q8_0<uint16_t>(int64_t, int64_t, const int8_t*, const uint16_t*, int8_t*, uint16_t*);
 template void repack_B_q4_0<float>(int64_t, int64_t, const uint32_t*, const float*, uint32_t*, float*);
+template void repack_B_q4_0<uint16_t>(int64_t, int64_t, const uint32_t*, const uint16_t*, uint32_t*, uint16_t*);
 
 // ==================== GEMM Compute Functions ====================
 
+template<typename B_SCALE_TYPE>
 void gemm_q8_0_compute_packed(
     int M, int N, int K,
     const int8_t* A_qs_packed,
     const float* A_d_packed,
     const int8_t* B_qs_packed,
-    const at::Half* B_d_packed_f16,
+    const B_SCALE_TYPE* B_d_packed,
     float* C,
     int ldc)
 {
@@ -570,7 +586,7 @@ void gemm_q8_0_compute_packed(
                     A_qs_packed,
                     A_d_packed,
                     B_qs_packed + (jc + jr) * K,
-                    B_d_packed_f16 + (jc + jr) * (K / QK8_0),
+                    B_d_packed + (jc + jr) * (K / QK8_0),
                     C + (jc + jr),
                     ldc,
                     false);
@@ -590,7 +606,7 @@ void gemm_q8_0_compute_packed(
                             A_qs_packed + (ir) * K + kc * MR,
                             A_d_packed + (ir) * K_BLOCKS + k_block_offset * MR,
                             B_qs_packed + (jc + jr) * K + kc * NR,
-                            B_d_packed_f16 + (jc + jr) * K_BLOCKS + k_block_offset * NR,
+                            B_d_packed + (jc + jr) * K_BLOCKS + k_block_offset * NR,
                             C + (ir) * ldc + (jc + jr), ldc, kc != 0);
                     }
                 }
@@ -599,12 +615,17 @@ void gemm_q8_0_compute_packed(
     }
 }
 
+// Template instantiations
+template void gemm_q8_0_compute_packed<at::Half>(int, int, int, const int8_t*, const float*, const int8_t*, const at::Half*, float*, int);
+template void gemm_q8_0_compute_packed<at::BFloat16>(int, int, int, const int8_t*, const float*, const int8_t*, const at::BFloat16*, float*, int);
+
+template<typename B_SCALE_TYPE>
 void gemm_q4_0_compute_packed(
     int M, int N, int K,
     const int8_t* A_qs_packed,
     const float* A_d_packed,
     const uint32_t* B_qs_packed,
-    const at::Half* B_d_packed_f16,
+    const B_SCALE_TYPE* B_d_packed,
     float* C,
     int ldc)
 {
@@ -616,9 +637,9 @@ void gemm_q4_0_compute_packed(
 
     constexpr int INT4_PER_UINT32 = 8;
     // 1 个 K_BLOCK 在单列中占用的 uint32_t 数量 (32 / 8 = 4)
-    constexpr int UINT32_PER_K_BLOCK_COL = QK4_0 / INT4_PER_UINT32; 
+    constexpr int UINT32_PER_K_BLOCK_COL = QK4_0 / INT4_PER_UINT32;
     // 1 个 K_BLOCK 在一个 NR 宏块中占用的 uint32_t 数量 (4 * NR)
-    constexpr int UINT32_PER_K_BLOCK_MACRO = UINT32_PER_K_BLOCK_COL * NR; 
+    constexpr int UINT32_PER_K_BLOCK_MACRO = UINT32_PER_K_BLOCK_COL * NR;
 
     const int K_BLOCKS = K / QK4_0;
     const int num_nc_blocks = (N + NC - 1) / NC;
@@ -632,8 +653,8 @@ void gemm_q4_0_compute_packed(
                     K, M,
                     A_qs_packed,
                     A_d_packed,
-                    B_qs_packed + (jc + jr) * K_BLOCKS * UINT32_PER_K_BLOCK_COL, 
-                    B_d_packed_f16 + (jc + jr) * K_BLOCKS,
+                    B_qs_packed + (jc + jr) * K_BLOCKS * UINT32_PER_K_BLOCK_COL,
+                    B_d_packed + (jc + jr) * K_BLOCKS,
                     C + (jc + jr),
                     ldc,
                     false);
@@ -652,9 +673,9 @@ void gemm_q4_0_compute_packed(
                             kc_size, std::min(MR, M - ir),
                             A_qs_packed + (ir) * K + kc * MR,
                             A_d_packed + (ir) * K_BLOCKS + k_block_offset * MR,
-                            B_qs_packed + (jc + jr) * K_BLOCKS * UINT32_PER_K_BLOCK_COL 
+                            B_qs_packed + (jc + jr) * K_BLOCKS * UINT32_PER_K_BLOCK_COL
                                         + k_block_offset * UINT32_PER_K_BLOCK_MACRO,
-                            B_d_packed_f16 + (jc + jr) * K_BLOCKS + k_block_offset * NR,
+                            B_d_packed + (jc + jr) * K_BLOCKS + k_block_offset * NR,
                             C + (ir) * ldc + (jc + jr), ldc, kc != 0);
                     }
                 }
@@ -662,5 +683,9 @@ void gemm_q4_0_compute_packed(
         };
     }
 }
+
+// Template instantiations
+template void gemm_q4_0_compute_packed<at::Half>(int, int, int, const int8_t*, const float*, const uint32_t*, const at::Half*, float*, int);
+template void gemm_q4_0_compute_packed<at::BFloat16>(int, int, int, const int8_t*, const float*, const uint32_t*, const at::BFloat16*, float*, int);
 
 } // namespace gemm
