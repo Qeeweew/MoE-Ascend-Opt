@@ -56,9 +56,9 @@ MoEInfer::MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediat
     }
 
     gate_up_d_bytes_per_tp_  =
-        (size_t)num_experts_ * (size_t)(2 * Ish) * (size_t)H_BLK * sizeof(at::Half);
+        (size_t)num_experts_ * (size_t)(2 * Ish) * (size_t)H_BLK * sizeof(uint16_t);
     down_d_bytes_per_tp_  =
-        (size_t)num_experts_ * (size_t)H * (size_t)Ish_BLK * sizeof(at::Half);
+        (size_t)num_experts_ * (size_t)H * (size_t)Ish_BLK * sizeof(uint16_t);
 
     gate_up_qs_tp_.resize((size_t)tp_size_, nullptr);
     gate_up_d_tp_.resize((size_t)tp_size_, nullptr);
@@ -68,9 +68,9 @@ MoEInfer::MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediat
     for (int tp = 0; tp < (int)tp_size_; ++tp) {
         int node = tp;
         gate_up_qs_tp_[(size_t)tp]   = (int8_t*)numa_alloc_or_throw(gate_up_qs_bytes_per_tp_, node);
-        gate_up_d_tp_[(size_t)tp]    = (at::Half*)numa_alloc_or_throw(gate_up_d_bytes_per_tp_, node);
+        gate_up_d_tp_[(size_t)tp]    = (uint16_t*)numa_alloc_or_throw(gate_up_d_bytes_per_tp_, node);
         down_proj_qs_tp_[(size_t)tp] = (int8_t*)numa_alloc_or_throw(down_qs_bytes_per_tp_, node);
-        down_proj_d_tp_[(size_t)tp]  = (at::Half*)numa_alloc_or_throw(down_d_bytes_per_tp_, node);
+        down_proj_d_tp_[(size_t)tp]  = (uint16_t*)numa_alloc_or_throw(down_d_bytes_per_tp_, node);
     }
 }
 
@@ -102,8 +102,13 @@ void MoEInfer::store_quantized_weights_repack(
     TORCH_CHECK(gate_up_qs.is_contiguous() && gate_up_d.is_contiguous(), "gate_up must be contiguous");
     TORCH_CHECK(down_proj_qs.is_contiguous() && down_proj_d.is_contiguous(), "down_proj must be contiguous");
 
-    TORCH_CHECK(gate_up_d.scalar_type() == torch::kFloat16, "gate_up_d must be float16");
-    TORCH_CHECK(down_proj_d.scalar_type() == torch::kFloat16, "down_proj_d must be float16");
+    // Support both FP16 and BF16 scales
+    TORCH_CHECK(gate_up_d.scalar_type() == torch::kFloat16 || gate_up_d.scalar_type() == torch::kBFloat16,
+                "gate_up_d must be float16 or bfloat16");
+    TORCH_CHECK(down_proj_d.scalar_type() == torch::kFloat16 || down_proj_d.scalar_type() == torch::kBFloat16,
+                "down_proj_d must be float16 or bfloat16");
+    TORCH_CHECK(gate_up_d.scalar_type() == down_proj_d.scalar_type(),
+                "gate_up_d and down_proj_d must have the same dtype");
 
     TORCH_CHECK(gate_up_qs.dim() == 3, "gate_up_qs must be [E,2I,H]");
     TORCH_CHECK(down_proj_qs.dim() == 3, "down_proj_qs must be [E,H,I]");
@@ -118,16 +123,22 @@ void MoEInfer::store_quantized_weights_repack(
     const int64_t Ish_BLK = Ish / 32;
     const int64_t I_BLK = I / 32;
 
+    // Determine scale type and use uint16_t for repack (simplified handling)
+    const bool use_bf16 = (gate_up_d.scalar_type() == torch::kBFloat16);
+    scale_dtype_ = use_bf16 ? at::kBFloat16 : at::kHalf;
+
     // Dispatch based on quantization type
     if (quant_type_ == quant::QuantType::Q4_0) {
         // Q4_0 path: weights are uint32_t (packed 4-bit)
         TORCH_CHECK(gate_up_qs.scalar_type() == torch::kInt32 || gate_up_qs.scalar_type() ==  torch::kUInt32, "Q4_0 gate_up_qs must be int32 (uint32 storage)");
         TORCH_CHECK(down_proj_qs.scalar_type() == torch::kInt32 || down_proj_qs.scalar_type() ==  torch::kUInt32, "Q4_0 down_proj_qs must be int32 (uint32 storage)");
 
-        const uint32_t* src_gate_up_qs = gate_up_qs.data_ptr<uint32_t>();
-        const at::Half*  src_gate_up_d  = (const at::Half*)gate_up_d.data_ptr<at::Half>();
-        const uint32_t* src_down_qs     = down_proj_qs.data_ptr<uint32_t>();
-        const at::Half*  src_down_d     = (const at::Half*)down_proj_d.data_ptr<at::Half>();
+        const uint32_t* src_gate_up_qs  = static_cast<const uint32_t*>(gate_up_qs.data_ptr());
+        const uint32_t* src_down_qs     = static_cast<const uint32_t*>(down_proj_qs.data_ptr());
+
+        // Use uint16_t for scale pointers (simplified handling as per requirements)
+        const uint16_t* src_gate_up_d = static_cast<const uint16_t*>(gate_up_d.data_ptr());
+        const uint16_t* src_down_d = static_cast<const uint16_t*>(down_proj_d.data_ptr());
 
         // gate_up: shard on N (rows): [2I, H] -> tp blocks [2Ish, H]
         for (int64_t exp = 0; exp < num_experts_; ++exp) {
@@ -136,13 +147,13 @@ void MoEInfer::store_quantized_weights_repack(
 
                 // Base pointers for TP's local buffer
                 uint32_t* dst_qs = (uint32_t*)gate_up_qs_tp_[(size_t)tp] + exp * (2 * Ish * K / 8);
-                at::Half* dst_d  = gate_up_d_tp_[(size_t)tp]  + exp * (2 * Ish * H_BLK);
+                uint16_t* dst_d  = reinterpret_cast<uint16_t*>(gate_up_d_tp_[(size_t)tp]) + exp * (2 * Ish * H_BLK);
 
                 // 1) Repack the `gate` portion (N = Ish)
                 const int64_t gate_src_qs = exp * (2 * I * H / 8) + tp * (Ish * K / 8);
                 const int64_t gate_src_d  = exp * (2 * I * H_BLK) + tp * (Ish * H_BLK);
-                
-                gemm::repack_B_q4_0<at::Half>(
+
+                gemm::repack_B_q4_0<uint16_t>(
                     Ish, K,
                     src_gate_up_qs + gate_src_qs,
                     src_gate_up_d  + gate_src_d,
@@ -153,8 +164,8 @@ void MoEInfer::store_quantized_weights_repack(
                 // Offset source by I rows to reach the `up` matrix
                 const int64_t up_src_qs = exp * (2 * I * H / 8) + I * (K / 8) + tp * (Ish * K / 8);
                 const int64_t up_src_d  = exp * (2 * I * H_BLK) + I * H_BLK + tp * (Ish * H_BLK);
-                
-                gemm::repack_B_q4_0<at::Half>(
+
+                gemm::repack_B_q4_0<uint16_t>(
                     Ish, K,
                     src_gate_up_qs + up_src_qs,
                     src_gate_up_d  + up_src_d,
@@ -166,7 +177,7 @@ void MoEInfer::store_quantized_weights_repack(
 
         // down_proj: shard on K (cols): [H, I] -> tp blocks [H, Ish]
         std::vector<uint32_t> tmp_qs((size_t)H * (size_t)Ish / 8);
-        std::vector<at::Half> tmp_d ((size_t)H * (size_t)Ish_BLK);
+        std::vector<uint16_t> tmp_d ((size_t)H * (size_t)Ish_BLK);
 
         for (int64_t exp = 0; exp < num_experts_; ++exp) {
             for (int64_t tp = 0; tp < tp_size_; ++tp) {
@@ -179,13 +190,13 @@ void MoEInfer::store_quantized_weights_repack(
                     const int64_t src_row_d_off = exp * (H * I_BLK) + row * I_BLK + tp * Ish_BLK;
                     std::memcpy(tmp_d.data() + row * Ish_BLK,
                                 src_down_d + src_row_d_off,
-                                (size_t)Ish_BLK * sizeof(at::Half));
+                                (size_t)Ish_BLK * sizeof(uint16_t));
                 }
 
                 uint32_t* dst_qs = (uint32_t*)down_proj_qs_tp_[(size_t)tp] + exp * (H * Ish / 8);
-                at::Half*  dst_d  = down_proj_d_tp_[(size_t)tp]  + exp * (H * Ish_BLK);
+                uint16_t* dst_d  = reinterpret_cast<uint16_t*>(down_proj_d_tp_[(size_t)tp]) + exp * (H * Ish_BLK);
 
-                gemm::repack_B_q4_0<at::Half>(
+                gemm::repack_B_q4_0<uint16_t>(
                     /*N=*/H, /*K=*/Ish,
                     tmp_qs.data(), tmp_d.data(),
                     dst_qs, dst_d
@@ -197,10 +208,12 @@ void MoEInfer::store_quantized_weights_repack(
         TORCH_CHECK(gate_up_qs.scalar_type() == torch::kInt8, "Q8_0 gate_up_qs must be int8");
         TORCH_CHECK(down_proj_qs.scalar_type() == torch::kInt8, "Q8_0 down_proj_qs must be int8");
 
-        const int8_t*   src_gate_up_qs = gate_up_qs.data_ptr<int8_t>();
-        const at::Half* src_gate_up_d  = (const at::Half*)gate_up_d.data_ptr<at::Half>();
-        const int8_t*   src_down_qs    = down_proj_qs.data_ptr<int8_t>();
-        const at::Half* src_down_d     = (const at::Half*)down_proj_d.data_ptr<at::Half>();
+        const int8_t* src_gate_up_qs = gate_up_qs.data_ptr<int8_t>();
+        const int8_t* src_down_qs    = down_proj_qs.data_ptr<int8_t>();
+
+        // Use uint16_t for scale pointers (simplified handling as per requirements)
+        const uint16_t* src_gate_up_d = reinterpret_cast<const uint16_t*>(gate_up_d.data_ptr());
+        const uint16_t* src_down_d = reinterpret_cast<const uint16_t*>(down_proj_d.data_ptr());
 
         // gate_up: shard on N (rows): [2I, H] -> tp blocks [2Ish, H]
         for (int64_t exp = 0; exp < num_experts_; ++exp) {
@@ -209,13 +222,13 @@ void MoEInfer::store_quantized_weights_repack(
 
                 // Base pointers for TP's local buffer
                 int8_t* dst_qs = gate_up_qs_tp_[(size_t)tp] + exp * (2 * Ish * K);
-                at::Half* dst_d  = gate_up_d_tp_[(size_t)tp]  + exp * (2 * Ish * H_BLK);
+                uint16_t* dst_d = reinterpret_cast<uint16_t*>(gate_up_d_tp_[(size_t)tp]) + exp * (2 * Ish * H_BLK);
 
                 // 1) Repack the `gate` portion (N = Ish)
                 const int64_t gate_src_qs = exp * (2 * I * H) + tp * (Ish * K);
                 const int64_t gate_src_d  = exp * (2 * I * H_BLK) + tp * (Ish * H_BLK);
 
-                gemm::repack_B_q8_0<at::Half>(
+                gemm::repack_B_q8_0<uint16_t>(
                     Ish, K,
                     src_gate_up_qs + gate_src_qs,
                     src_gate_up_d  + gate_src_d,
@@ -227,7 +240,7 @@ void MoEInfer::store_quantized_weights_repack(
                 const int64_t up_src_qs = exp * (2 * I * H) + I * K + tp * (Ish * K);
                 const int64_t up_src_d  = exp * (2 * I * H_BLK) + I * H_BLK + tp * (Ish * H_BLK);
 
-                gemm::repack_B_q8_0<at::Half>(
+                gemm::repack_B_q8_0<uint16_t>(
                     Ish, K,
                     src_gate_up_qs + up_src_qs,
                     src_gate_up_d  + up_src_d,
@@ -239,7 +252,7 @@ void MoEInfer::store_quantized_weights_repack(
 
         // down_proj: shard on K (cols): [H, I] -> tp blocks [H, Ish]
         std::vector<int8_t>   tmp_qs((size_t)H * (size_t)Ish);
-        std::vector<at::Half> tmp_d ((size_t)H * (size_t)Ish_BLK);
+        std::vector<uint16_t> tmp_d ((size_t)H * (size_t)Ish_BLK);
 
         for (int64_t exp = 0; exp < num_experts_; ++exp) {
             for (int64_t tp = 0; tp < tp_size_; ++tp) {
@@ -252,13 +265,13 @@ void MoEInfer::store_quantized_weights_repack(
                     const int64_t src_row_d_off = exp * (H * I_BLK) + row * I_BLK + tp * Ish_BLK;
                     std::memcpy(tmp_d.data() + row * Ish_BLK,
                                 src_down_d + src_row_d_off,
-                                (size_t)Ish_BLK * sizeof(at::Half));
+                                (size_t)Ish_BLK * sizeof(uint16_t));
                 }
 
-                int8_t*   dst_qs = down_proj_qs_tp_[(size_t)tp] + exp * (H * Ish);
-                at::Half* dst_d  = down_proj_d_tp_[(size_t)tp]  + exp * (H * Ish_BLK);
+                int8_t* dst_qs = down_proj_qs_tp_[(size_t)tp] + exp * (H * Ish);
+                uint16_t* dst_d = reinterpret_cast<uint16_t*>(down_proj_d_tp_[(size_t)tp]) + exp * (H * Ish_BLK);
 
-                gemm::repack_B_q8_0<at::Half>(
+                gemm::repack_B_q8_0<uint16_t>(
                     /*N=*/H, /*K=*/Ish,
                     tmp_qs.data(), tmp_d.data(),
                     dst_qs, dst_d
@@ -286,7 +299,7 @@ void MoEInfer::quantize_and_store_expert(
     torch::Tensor& d  = q[1];
 
     const int8_t*   qs_ptr = qs.data_ptr<int8_t>();
-    const at::Half* d_ptr  = (const at::Half*)d.data_ptr<at::Half>();
+    const uint16_t* d_ptr  = static_cast<const uint16_t*>(d.data_ptr());
 
     if (proj_name == "gate_proj" || proj_name == "up_proj") {
         TORCH_CHECK(qs.size(0) == I && qs.size(1) == H, "gate/up weight must be [I,H]");
@@ -302,9 +315,9 @@ void MoEInfer::quantize_and_store_expert(
 
             // per-tp buffer, per-expert offset
             int8_t*   dst_qs = gate_up_qs_tp_[(size_t)tp] + expert_idx * (2 * Ish * H) + row_off * H;
-            at::Half* dst_d  = gate_up_d_tp_[(size_t)tp]  + expert_idx * (2 * Ish * H_BLK) + row_off * H_BLK;
+            uint16_t* dst_d  = gate_up_d_tp_[(size_t)tp]  + expert_idx * (2 * Ish * H_BLK) + row_off * H_BLK;
 
-            repack_B_q8_0_from_ptr<at::Half>(
+            gemm::repack_B_q8_0<uint16_t>(
                 N, K,
                 qs_ptr + src_base_qs,
                 d_ptr  + src_base_d,
@@ -318,7 +331,7 @@ void MoEInfer::quantize_and_store_expert(
         TORCH_CHECK(qs.size(0) == H && qs.size(1) == I, "down weight must be [H,I]");
 
         std::vector<int8_t>   tmp_qs((size_t)H * (size_t)Ish);
-        std::vector<at::Half> tmp_d ((size_t)H * (size_t)Ish_BLK);
+        std::vector<uint16_t> tmp_d ((size_t)H * (size_t)Ish_BLK);
 
         for (int64_t tp = 0; tp < tp_size_; ++tp) {
             for (int64_t row = 0; row < H; ++row) {
@@ -328,13 +341,13 @@ void MoEInfer::quantize_and_store_expert(
 
                 std::memcpy(tmp_d.data() + row * Ish_BLK,
                             d_ptr + row * I_BLK + tp * Ish_BLK,
-                            (size_t)Ish_BLK * sizeof(at::Half));
+                            (size_t)Ish_BLK * sizeof(uint16_t));
             }
 
             int8_t*   dst_qs = down_proj_qs_tp_[(size_t)tp] + expert_idx * (H * Ish);
-            at::Half* dst_d  = down_proj_d_tp_[(size_t)tp]  + expert_idx * (H * Ish_BLK);
+            uint16_t* dst_d  = down_proj_d_tp_[(size_t)tp]  + expert_idx * (H * Ish_BLK);
 
-            repack_B_q8_0_from_ptr<at::Half>(
+            gemm::repack_B_q8_0<uint16_t>(
                 H, Ish,
                 tmp_qs.data(), tmp_d.data(),
                 dst_qs, dst_d
@@ -355,53 +368,49 @@ void MoEInfer::execute_on_cpu_routed_from_pointers(
     int64_t top_k,
     at::ScalarType dtype) {
 
-    // Start timing
     auto start = std::chrono::high_resolution_clock::now();
 
-    AT_DISPATCH_REDUCED_FLOATING_TYPES(
-        dtype, "moe_execute_routed_dispatch",
-        [&] {
-            // Dispatch based on quantization type to unified template function
-            if (quant_type_ == quant::QuantType::Q8_0) {
-                moe_forward_ptr_impl<quant::QuantType::Q8_0, scalar_t>(
+    // Helper lambda to dispatch based on scale dtype
+    auto dispatch_scale = [&](auto quant_type_constant) {
+        using QuantType = decltype(quant_type_constant);
+        if (scale_dtype_ == at::kBFloat16) {
+            AT_DISPATCH_REDUCED_FLOATING_TYPES(dtype, "moe_execute_routed_dispatch", [&] {
+                moe_forward_ptr_impl<QuantType::value, scalar_t, at::BFloat16>(
                     (const scalar_t*)x_in_ptr,
                     (scalar_t*)y_out_ptr,
                     topk_weights_ptr,
                     topk_ids_ptr,
                     reinterpret_cast<const void* const*>(gate_up_qs_tp_.data()),
-                    gate_up_d_tp_.data(),
+                    reinterpret_cast<const at::BFloat16* const*>(gate_up_d_tp_.data()),
                     reinterpret_cast<const void* const*>(down_proj_qs_tp_.data()),
-                    down_proj_d_tp_.data(),
-                    num_tokens,
-                    hidden_size_,
-                    num_experts_,
-                    intermediate_size_,
-                    tp_size_,
-                    top_k
+                    reinterpret_cast<const at::BFloat16* const*>(down_proj_d_tp_.data()),
+                    num_tokens, hidden_size_, num_experts_, intermediate_size_, tp_size_, top_k
                 );
-            } else {
-                moe_forward_ptr_impl<quant::QuantType::Q4_0, scalar_t>(
+            });
+        } else {
+            AT_DISPATCH_REDUCED_FLOATING_TYPES(dtype, "moe_execute_routed_dispatch", [&] {
+                moe_forward_ptr_impl<QuantType::value, scalar_t, at::Half>(
                     (const scalar_t*)x_in_ptr,
                     (scalar_t*)y_out_ptr,
                     topk_weights_ptr,
                     topk_ids_ptr,
                     reinterpret_cast<const void* const*>(gate_up_qs_tp_.data()),
-                    gate_up_d_tp_.data(),
+                    reinterpret_cast<const at::Half* const*>(gate_up_d_tp_.data()),
                     reinterpret_cast<const void* const*>(down_proj_qs_tp_.data()),
-                    down_proj_d_tp_.data(),
-                    num_tokens,
-                    hidden_size_,
-                    num_experts_,
-                    intermediate_size_,
-                    tp_size_,
-                    top_k
+                    reinterpret_cast<const at::Half* const*>(down_proj_d_tp_.data()),
+                    num_tokens, hidden_size_, num_experts_, intermediate_size_, tp_size_, top_k
                 );
-            }
+            });
         }
-    );
+    };
 
-    // End timing and store result in milliseconds
+    // Dispatch based on quantization type
+    if (quant_type_ == quant::QuantType::Q8_0) {
+        dispatch_scale(std::integral_constant<quant::QuantType, quant::QuantType::Q8_0>{});
+    } else {
+        dispatch_scale(std::integral_constant<quant::QuantType, quant::QuantType::Q4_0>{});
+    }
+
     auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> diff = end - start;
-    last_run_time_ms_ = diff.count();
+    last_run_time_ms_ = std::chrono::duration<double, std::milli>(end - start).count();
 }
