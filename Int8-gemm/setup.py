@@ -12,6 +12,8 @@ setup(
                 "q8_gemm.cpp",
                 "moe_infer.cpp",
                 "nanovllm_ops.cpp",
+                "moe_common.cpp",
+                "gemm_kernels.cpp"
             ],
             define_macros=[("WITH_NPU", None)],
             extra_compile_args=[
