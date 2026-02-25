@@ -38,8 +38,8 @@ def pack_int4_to_uint32(int4_values):
     assert len(int4_values) == 8
     # Convert to uint4 (0-15 range)
     q = [(v & 0xF) for v in int4_values]
-    packed = (q[0] << 0) | (q[1] << 8) | (q[2] << 16) | (q[3] << 24) | \
-             (q[4] << 4) | (q[5] << 12) | (q[6] << 20) | (q[7] << 28)
+    packed = (q[0] << 0) | (q[2] << 8) | (q[4] << 16) | (q[6] << 24) | \
+             (q[1] << 4) | (q[3] << 12) | (q[5] << 20) | (q[7] << 28)
     return np.uint32(packed)
 
 
@@ -58,12 +58,12 @@ def unpack_uint32_to_int4_vec(packed_array):
     # Extract 8 nibbles per uint32 using bit operations
     # Format: [q0, q4, q1, q5, q2, q6, q3, q7]
     q0 = (packed_array >> 0) & 0xF
-    q4 = (packed_array >> 4) & 0xF
-    q1 = (packed_array >> 8) & 0xF
-    q5 = (packed_array >> 12) & 0xF
-    q2 = (packed_array >> 16) & 0xF
-    q6 = (packed_array >> 20) & 0xF
-    q3 = (packed_array >> 24) & 0xF
+    q1 = (packed_array >> 4) & 0xF
+    q2 = (packed_array >> 8) & 0xF
+    q3 = (packed_array >> 12) & 0xF
+    q4 = (packed_array >> 16) & 0xF
+    q5 = (packed_array >> 20) & 0xF
+    q6 = (packed_array >> 24) & 0xF
     q7 = (packed_array >> 28) & 0xF
 
     # Stack and convert to int4 in correct order [q0, q1, q2, q3, q4, q5, q6, q7]

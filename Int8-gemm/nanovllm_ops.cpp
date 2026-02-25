@@ -116,49 +116,66 @@ struct PinnedBuffer {
 };
 
 struct MoECpuTaskArgs {
+    // Direct function pointer - eliminates virtual/object dispatch
+    MoEInfer::ExecuteFn execute_fn;
+
+    // All parameters needed for the call (flattened)
     const void* x_in_ptr;
     void* y_out_ptr;
+    const float* topk_weights_ptr;
     const int32_t* topk_ids_ptr;
-    const float* topk_w_ptr;
+    const void* const* gate_up_qs_tp;
+    const void* const* gate_up_d_tp;
+    const void* const* down_proj_qs_tp;
+    const void* const* down_proj_d_tp;
     int64_t num_tokens;
+    int64_t hidden_size;
+    int64_t num_experts;
+    int64_t intermediate_size;
+    int64_t tp_size;
     int64_t top_k;
-    MoEInfer* moe;
-    at::ScalarType dtype;
 };
 
+// Direct callback - calls execute_fn directly, no intermediate function
 static void moe_compute_callback(void* user_data) {
     auto* args = reinterpret_cast<MoECpuTaskArgs*>(user_data);
-    args->moe->execute_on_cpu_routed_from_pointers(
-        args->x_in_ptr, args->y_out_ptr,
-        args->topk_ids_ptr, args->topk_w_ptr,
-        args->num_tokens, args->top_k, args->dtype
+    args->execute_fn(
+        args->x_in_ptr,
+        args->y_out_ptr,
+        args->topk_weights_ptr,
+        args->topk_ids_ptr,
+        args->gate_up_qs_tp,
+        args->gate_up_d_tp,
+        args->down_proj_qs_tp,
+        args->down_proj_d_tp,
+        args->num_tokens,
+        args->hidden_size,
+        args->num_experts,
+        args->intermediate_size,
+        args->tp_size,
+        args->top_k
     );
 }
 
 struct MoEGraphContext : torch::CustomClassHolder {
-    int64_t tokens_bucket;
-    int64_t top_k;
-    at::ScalarType dtype;
-
     PinnedBuffer hidden_in, hidden_out, topk_ids, topk_w;
     MoECpuTaskArgs args;
 
     MoEGraphContext(const c10::intrusive_ptr<MoEInferHandle>& moe_h,
-                    int64_t tokens_bucket_,
-                    int64_t top_k_,
-                    int64_t dtype_int)
-        : tokens_bucket(tokens_bucket_), top_k(top_k_) {
+                    int64_t num_tokens,
+                    int64_t top_k,
+                    int64_t dtype_int) {
 
-        dtype = (dtype_int == 0) ? at::kHalf : at::kBFloat16;
+        auto dtype = (dtype_int == 0) ? at::kHalf : at::kBFloat16;
         TORCH_CHECK(top_k == 1 || top_k == 8 || top_k == 10);
         TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16);
 
         const int64_t H = moe_h->impl->hidden_size();
         const size_t elem = (dtype == at::kHalf) ? sizeof(at::Half) : sizeof(at::BFloat16);
 
-        const size_t hb = (size_t)tokens_bucket * (size_t)H * elem;
-        const size_t ib = (size_t)tokens_bucket * (size_t)top_k * sizeof(int32_t);
-        const size_t wb = (size_t)tokens_bucket * (size_t)top_k * sizeof(float);
+        const size_t hb = (size_t)num_tokens * (size_t)H * elem;
+        const size_t ib = (size_t)num_tokens * (size_t)top_k * sizeof(int32_t);
+        const size_t wb = (size_t)num_tokens * (size_t)top_k * sizeof(float);
 
         hidden_in.alloc(hb);
         hidden_out.alloc(hb);
@@ -168,11 +185,18 @@ struct MoEGraphContext : torch::CustomClassHolder {
         args.x_in_ptr = hidden_in.ptr;
         args.y_out_ptr = hidden_out.ptr;
         args.topk_ids_ptr = (const int32_t*)topk_ids.ptr;
-        args.topk_w_ptr = (const float*)topk_w.ptr;
-        args.num_tokens = tokens_bucket;
+        args.topk_weights_ptr = (const float*)topk_w.ptr;
+        args.num_tokens = num_tokens;
         args.top_k = top_k;
-        args.moe = moe_h->impl.get();
-        args.dtype = dtype;
+        args.hidden_size = moe_h->impl->hidden_size();
+        args.num_experts = moe_h->impl->num_experts();
+        args.intermediate_size = moe_h->impl->intermediate_size();
+        args.tp_size = moe_h->impl->tp_size();
+        args.execute_fn = moe_h->impl->get_execute_function(dtype);
+        args.gate_up_qs_tp = moe_h->impl->gate_up_qs_tp_data();
+        args.gate_up_d_tp = moe_h->impl->gate_up_d_tp_data();
+        args.down_proj_qs_tp = moe_h->impl->down_proj_qs_tp_data();
+        args.down_proj_d_tp = moe_h->impl->down_proj_d_tp_data();
     }
 };
 
@@ -230,10 +254,6 @@ static torch::Tensor moe_forward_npu_stream(
 
     auto* cd = new StreamCallData();
     cd->device_id = hidden_npu.get_device();
-    cd->args.moe = moe_h->impl.get();
-    cd->args.num_tokens = tokens;
-    cd->args.top_k = top_k;
-    cd->args.dtype = (at::ScalarType)hidden_npu.scalar_type();
 
     const size_t hb = hidden_npu.nbytes();
     const size_t ib = topk_ids_npu.nbytes();
@@ -244,10 +264,24 @@ static torch::Tensor moe_forward_npu_stream(
     cd->topk_ids.alloc(ib);
     cd->topk_w.alloc(wb);
 
+    // Pre-bind execute function and all parameters
+    
+    cd->args.execute_fn = moe_h->impl->get_execute_function(hidden_npu.scalar_type());
     cd->args.x_in_ptr = cd->hidden_in.ptr;
     cd->args.y_out_ptr = cd->hidden_out.ptr;
     cd->args.topk_ids_ptr = (const int32_t*)cd->topk_ids.ptr;
-    cd->args.topk_w_ptr = (const float*)cd->topk_w.ptr;
+    cd->args.topk_weights_ptr = (const float*)cd->topk_w.ptr;
+    cd->args.num_tokens = tokens;
+    cd->args.top_k = top_k;
+    cd->args.hidden_size = moe_h->impl->hidden_size();
+    cd->args.num_experts = moe_h->impl->num_experts();
+    cd->args.intermediate_size = moe_h->impl->intermediate_size();
+    cd->args.tp_size = moe_h->impl->tp_size();
+    // Weight pointers fetched from moe_h at callback time via get_weight_pointers
+    cd->args.gate_up_qs_tp = moe_h->impl->gate_up_qs_tp_data();
+    cd->args.gate_up_d_tp = moe_h->impl->gate_up_d_tp_data();
+    cd->args.down_proj_qs_tp = moe_h->impl->down_proj_qs_tp_data();
+    cd->args.down_proj_d_tp = moe_h->impl->down_proj_d_tp_data();
 
     aclrtStream stream = current_acl_stream(hidden_npu.get_device());
 

@@ -17,6 +17,7 @@ public:
     int64_t num_experts() const { return num_experts_; }
     int64_t hidden_size() const { return hidden_size_; }
     int64_t intermediate_size() const { return intermediate_size_; }
+    int64_t tp_size() const { return tp_size_; }
 
     // Get last forward execution time in milliseconds
     double get_last_run_time_ms() const { return last_run_time_ms_; }
@@ -37,6 +38,31 @@ public:
         const torch::Tensor& down_proj_qs, const torch::Tensor& down_proj_d
     );
 
+    // Get weight pointers for direct dispatch (zero-overhead callback)
+    const void* const* gate_up_qs_tp_data() const { return reinterpret_cast<const void* const*>(gate_up_qs_tp_.data()); }
+    const void* const* gate_up_d_tp_data() const { return reinterpret_cast<const void* const*>(gate_up_d_tp_.data()); }
+    const void* const* down_proj_qs_tp_data() const { return reinterpret_cast<const void* const*>(down_proj_qs_tp_.data()); }
+    const void* const* down_proj_d_tp_data() const { return reinterpret_cast<const void* const*>(down_proj_d_tp_.data()); }
+
+    // Check if execute function is initialized
+    bool is_execute_function_ready() const { return execute_fn_ != nullptr; }
+
+    // Execute function pointer type - public for zero-overhead dispatch
+    using ExecuteFn = void(*)(
+        const void* x_in_ptr,
+        void* y_out_ptr,
+        const float* topk_weights_ptr,
+        const int32_t* topk_ids_ptr,
+        const void* const* gate_up_qs_tp,
+        const void* const* gate_up_d_tp,
+        const void* const* down_proj_qs_tp,
+        const void* const* down_proj_d_tp,
+        int64_t num_tokens, int64_t hidden_dim, int64_t num_experts,
+        int64_t intermediate_size, int64_t tp_size, int64_t top_k);
+
+    // Get the bound execute function (for zero-overhead dispatch)
+    ExecuteFn get_execute_function(at::ScalarType dtype);
+
     void execute_on_cpu_routed_from_pointers(
         const void* x_in_ptr,
         void* y_out_ptr,
@@ -44,7 +70,7 @@ public:
         const float* topk_weights_ptr,
         int64_t num_tokens,
         int64_t top_k,
-        at::ScalarType dtype);
+        at::ScalarType dtype);  // Used only for lazy initialization on first call
 
 private:
     int64_t num_experts_;
@@ -75,4 +101,10 @@ private:
 
     // Helper to calculate quantized storage bytes
     size_t calculate_qs_bytes(int64_t rows, int64_t cols) const;
+
+    // Bound execute function (set once in constructor)
+    ExecuteFn execute_fn_ = nullptr;
+
+    // Initialize execute_fn_ based on configuration (called lazily on first execute)
+    void init_execute_function(at::ScalarType dtype);
 };
