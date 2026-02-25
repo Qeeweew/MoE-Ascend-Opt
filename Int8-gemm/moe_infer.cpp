@@ -359,6 +359,74 @@ void MoEInfer::quantize_and_store_expert(
     TORCH_CHECK(false, "Unknown proj_name: ", proj_name);
 }
 
+// Static template wrappers for each configuration
+// QT = QuantType, DT = DataType (Half/BFloat16), ST = ScaleType (Half/BFloat16)
+
+template<quant::QuantType QT, typename DT, typename ST>
+static void execute_wrapper(
+    const void* x_in_ptr, void* y_out_ptr,
+    const float* topk_weights_ptr, const int32_t* topk_ids_ptr,
+    const void* const* gate_up_qs_tp, const void* const* gate_up_d_tp,
+    const void* const* down_proj_qs_tp, const void* const* down_proj_d_tp,
+    int64_t num_tokens, int64_t hidden_dim, int64_t num_experts,
+    int64_t intermediate_size, int64_t tp_size, int64_t top_k) {
+    moe_forward_ptr_impl<QT, DT, ST>(
+        static_cast<const DT*>(x_in_ptr),
+        static_cast<DT*>(y_out_ptr),
+        topk_weights_ptr, topk_ids_ptr,
+        gate_up_qs_tp,
+        reinterpret_cast<const ST* const*>(gate_up_d_tp),
+        down_proj_qs_tp,
+        reinterpret_cast<const ST* const*>(down_proj_d_tp),
+        num_tokens, hidden_dim, num_experts, intermediate_size, tp_size, top_k
+    );
+}
+
+void MoEInfer::init_execute_function(at::ScalarType dtype) {
+    // All configurations are now fixed, select the appropriate function pointer
+    const bool is_bf16_scale = (scale_dtype_ == at::kBFloat16);
+    const bool is_q4 = (quant_type_ == quant::QuantType::Q4_0);
+    const bool is_bf16_act = (dtype == at::kBFloat16);
+
+    // 2x2x2 = 8 possible configurations
+    if (is_q4) {
+        if (is_bf16_act) {
+            if (is_bf16_scale) {
+                execute_fn_ = execute_wrapper<quant::QuantType::Q4_0, at::BFloat16, at::BFloat16>;
+            } else {
+                execute_fn_ = execute_wrapper<quant::QuantType::Q4_0, at::BFloat16, at::Half>;
+            }
+        } else {
+            if (is_bf16_scale) {
+                execute_fn_ = execute_wrapper<quant::QuantType::Q4_0, at::Half, at::BFloat16>;
+            } else {
+                execute_fn_ = execute_wrapper<quant::QuantType::Q4_0, at::Half, at::Half>;
+            }
+        }
+    } else {
+        if (is_bf16_act) {
+            if (is_bf16_scale) {
+                execute_fn_ = execute_wrapper<quant::QuantType::Q8_0, at::BFloat16, at::BFloat16>;
+            } else {
+                execute_fn_ = execute_wrapper<quant::QuantType::Q8_0, at::BFloat16, at::Half>;
+            }
+        } else {
+            if (is_bf16_scale) {
+                execute_fn_ = execute_wrapper<quant::QuantType::Q8_0, at::Half, at::BFloat16>;
+            } else {
+                execute_fn_ = execute_wrapper<quant::QuantType::Q8_0, at::Half, at::Half>;
+            }
+        }
+    }
+}
+
+MoEInfer::ExecuteFn MoEInfer::get_execute_function(at::ScalarType dtype) {
+    if (execute_fn_ == nullptr) {
+        init_execute_function(dtype);
+    }
+    return execute_fn_;
+}
+
 void MoEInfer::execute_on_cpu_routed_from_pointers(
     const void* x_in_ptr,
     void* y_out_ptr,
@@ -369,47 +437,19 @@ void MoEInfer::execute_on_cpu_routed_from_pointers(
     at::ScalarType dtype) {
 
     auto start = std::chrono::high_resolution_clock::now();
-
-    // Helper lambda to dispatch based on scale dtype
-    auto dispatch_scale = [&](auto quant_type_constant) {
-        using QuantType = decltype(quant_type_constant);
-        if (scale_dtype_ == at::kBFloat16) {
-            AT_DISPATCH_REDUCED_FLOATING_TYPES(dtype, "moe_execute_routed_dispatch", [&] {
-                moe_forward_ptr_impl<QuantType::value, scalar_t, at::BFloat16>(
-                    (const scalar_t*)x_in_ptr,
-                    (scalar_t*)y_out_ptr,
-                    topk_weights_ptr,
-                    topk_ids_ptr,
-                    reinterpret_cast<const void* const*>(gate_up_qs_tp_.data()),
-                    reinterpret_cast<const at::BFloat16* const*>(gate_up_d_tp_.data()),
-                    reinterpret_cast<const void* const*>(down_proj_qs_tp_.data()),
-                    reinterpret_cast<const at::BFloat16* const*>(down_proj_d_tp_.data()),
-                    num_tokens, hidden_size_, num_experts_, intermediate_size_, tp_size_, top_k
-                );
-            });
-        } else {
-            AT_DISPATCH_REDUCED_FLOATING_TYPES(dtype, "moe_execute_routed_dispatch", [&] {
-                moe_forward_ptr_impl<QuantType::value, scalar_t, at::Half>(
-                    (const scalar_t*)x_in_ptr,
-                    (scalar_t*)y_out_ptr,
-                    topk_weights_ptr,
-                    topk_ids_ptr,
-                    reinterpret_cast<const void* const*>(gate_up_qs_tp_.data()),
-                    reinterpret_cast<const at::Half* const*>(gate_up_d_tp_.data()),
-                    reinterpret_cast<const void* const*>(down_proj_qs_tp_.data()),
-                    reinterpret_cast<const at::Half* const*>(down_proj_d_tp_.data()),
-                    num_tokens, hidden_size_, num_experts_, intermediate_size_, tp_size_, top_k
-                );
-            });
-        }
-    };
-
-    // Dispatch based on quantization type
-    if (quant_type_ == quant::QuantType::Q8_0) {
-        dispatch_scale(std::integral_constant<quant::QuantType, quant::QuantType::Q8_0>{});
-    } else {
-        dispatch_scale(std::integral_constant<quant::QuantType, quant::QuantType::Q4_0>{});
+    if (execute_fn_ == nullptr) {
+        init_execute_function(dtype);
     }
+    // Direct call through function pointer - no dispatch overhead after first call
+    execute_fn_(
+        x_in_ptr, y_out_ptr,
+        topk_weights_ptr, topk_ids_ptr,
+        reinterpret_cast<const void* const*>(gate_up_qs_tp_.data()),
+        reinterpret_cast<const void* const*>(gate_up_d_tp_.data()),
+        reinterpret_cast<const void* const*>(down_proj_qs_tp_.data()),
+        reinterpret_cast<const void* const*>(down_proj_d_tp_.data()),
+        num_tokens, hidden_size_, num_experts_, intermediate_size_, tp_size_, top_k
+    );
 
     auto end = std::chrono::high_resolution_clock::now();
     last_run_time_ms_ = std::chrono::duration<double, std::milli>(end - start).count();

@@ -10,9 +10,9 @@ import time
 # 1. 测试参数定义
 # =============================================================================
 HIDDEN_SIZE = 2048
-INTERMEDIATE_SIZE = 512
+INTERMEDIATE_SIZE = 768
 NUM_EXPERTS = 128
-TOP_K = 10
+TOP_K = 8
 
 RENORMALIZE = True  # 此测试只用均匀权重，不影响性能；保留参数语义
 

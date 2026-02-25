@@ -520,7 +520,7 @@ void repack_B_q4_0(
     const int K_BLOCKS = K / QK4_0;
 
     for (int j = 0; j < N; j += NR) {
-        // 1. Repack scales
+        // 1. 重新打包缩放因子
         for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
             for (int col = 0; col < NR; ++col) {
                 if (j + col < N) {
@@ -530,19 +530,49 @@ void repack_B_q4_0(
             }
         }
 
-        // 2. Repack quantized values (uint32_t aware)
-        // Each K block has QK4_0 elements = 4 uint32_t blocks
+        // 2. 重新打包量化值，使用向量化nibble重排
         for(int k_block = 0; k_block < K_BLOCKS; ++k_block) {
-            for (int k_rem = 0; k_rem < QK4_0 / 8; ++k_rem) { // 4 iterations
-                for (int col = 0; col < NR; ++col) {
-                    if (j + col < N) {
-                        // (K / 8) is the stride because src_qs is uint32_t*
-                        dest_qs_packed[0] = src_qs[(j + col) * (K / 8) + k_block * 4 + k_rem];
-                    } else {
-                        dest_qs_packed[0] = 0;
-                    }
-                    dest_qs_packed++;
+            for (int k_rem = 0; k_rem < QK4_0 / 8; ++k_rem) { // 4次迭代
+                // 一次处理NR=8个uint32_t
+                uint32_t src_vals[NR];
+                
+                // 加载NR个元素
+                int actual_nr = std::min(NR, (int)(N - j));
+                for (int col = 0; col < actual_nr; ++col) {
+                    src_vals[col] = src_qs[(j + col) * (K / 8) + k_block * 4 + k_rem];
                 }
+                // 填充剩余元素为0
+                for (int col = actual_nr; col < NR; ++col) {
+                    src_vals[col] = 0;
+                }
+                
+                // 使用NEON向量化处理
+                for (int i = 0; i < NR; i += 4) {
+                    uint32x4_t v0 = vld1q_u32(src_vals + i);
+                    // 提取所有nibble
+                    uint32x4_t q0 = vandq_u32(v0, vdupq_n_u32(0x0000000F));
+                    uint32x4_t q1 = vandq_u32(vshrq_n_u32(v0, 4), vdupq_n_u32(0x0000000F));
+                    uint32x4_t q2 = vandq_u32(vshrq_n_u32(v0, 8), vdupq_n_u32(0x0000000F));
+                    uint32x4_t q3 = vandq_u32(vshrq_n_u32(v0, 12), vdupq_n_u32(0x0000000F));
+                    uint32x4_t q4 = vandq_u32(vshrq_n_u32(v0, 16), vdupq_n_u32(0x0000000F));
+                    uint32x4_t q5 = vandq_u32(vshrq_n_u32(v0, 20), vdupq_n_u32(0x0000000F));
+                    uint32x4_t q6 = vandq_u32(vshrq_n_u32(v0, 24), vdupq_n_u32(0x0000000F));
+                    uint32x4_t q7 = vandq_u32(vshrq_n_u32(v0, 28), vdupq_n_u32(0x0000000F));
+                    
+                    // 重新组合
+                    uint32x4_t out = 
+                        vorrq_u32(q0,
+                        vorrq_u32(vshlq_n_u32(q4, 4),
+                        vorrq_u32(vshlq_n_u32(q1, 8),
+                        vorrq_u32(vshlq_n_u32(q5, 12),
+                        vorrq_u32(vshlq_n_u32(q2, 16),
+                        vorrq_u32(vshlq_n_u32(q6, 20),
+                        vorrq_u32(vshlq_n_u32(q3, 24),
+                                vshlq_n_u32(q7, 28))))))));
+                    // 存储结果
+                    vst1q_u32((uint32_t*)dest_qs_packed + i, out);
+                }
+                dest_qs_packed += NR;
             }
         }
     }
