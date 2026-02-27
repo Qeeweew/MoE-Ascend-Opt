@@ -1,8 +1,6 @@
 [submodule "sgl-kernel-npu"]
 	path = sgl-kernel-npu
 	url = git@github.com:Qeeweew/sgl-kernel-npu.git
-	branch = ascend-awq
 [submodule "sglang"]
 	path = sglang
 	url = git@github.com:Qeeweew/sglang.git
-	branch = ascend-awq
