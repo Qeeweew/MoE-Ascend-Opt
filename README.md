@@ -3,12 +3,12 @@
 # MoE-Ascend-Opt: 面向国产异构平台的混合专家模型推理优化
 
 ![Platform](https://img.shields.io/badge/Platform-Huawei%20Ascend%20910B%20%2B%20Kunpeng%20920-red)
-![Model](https://img.shields.io/badge/Model-Qwen3%20MoE-blue)
-![Quantization](https://img.shields.io/badge/Quantization-AWQ%20W4A16%20%2F%20Int8-green)
+![Model](https://img.shields.io/badge/Model-Qwen3%20%2F%20MiniMax%20M2%20MoE-blue)
+![Quantization](https://img.shields.io/badge/Quantization-AWQ%20W4A16%20%2F%20Int8%20%2F%20Int4-green)
 
 **MoE-Ascend-Opt** 是一个针对国产异构计算平台（华为昇腾 910B NPU + 鲲鹏 920 CPU）的混合专家模型（MoE）推理优化项目。
 
-本项目旨在解决 MoE 模型在边缘计算或单卡部署场景下的**显存带宽瓶颈**与**容量限制**问题。通过在 NPU 端实现基于 Vector Core 的极致 W4A16 算子，以及在 CPU 端实现基于 ARM NEON 的高性能 Int8 算子，构建了一套“计算向数据靠拢”的动态异构推理系统。
+本项目旨在解决 MoE 模型在边缘计算或单卡部署场景下的**显存带宽瓶颈**与**容量限制**问题。通过在 NPU 端实现基于 Vector Core 的极致 W4A16 算子，以及在 CPU 端实现基于 ARM NEON 的高性能 Int8/Int4 算子，构建了一套”计算向数据靠拢”的动态异构推理系统。
 
 > **背景**: 本项目隶属于课题《面向国产异构平台的混合专家模型推理优化与动态卸载机制研究》。
 
@@ -34,7 +34,7 @@
 
 **优化原理**：**计算向数据靠拢 (Compute Offloading)**
 *   **ARM NEON 指令集优化**：
-    针对鲲鹏 CPU（ARMv8.2-A），手写了 `gemm_q8_0` 微内核。利用 `SDOT` (Signed Dot Product) 指令实现 4 路并行的 Int8 点积运算，并通过指令重排（Instruction Interleaving）掩盖内存加载延迟（Latency Hiding）。
+    针对鲲鹏 CPU（ARMv8.2-A），手写了 `gemm_q8_0` 与 `gemm_q4_0` 微内核。利用 `SDOT` (Signed Dot Product) 指令实现 4 路并行的 Int8/Int4 点积运算，并通过指令重排（Instruction Interleaving）掩盖内存加载延迟（Latency Hiding）。Int4 权重以 packed uint32 格式存储，每个元素 4-bit，显著降低内存占用。
 *   **NUMA 感知 (NUMA-Awareness)**：
     鲲鹏 920 是多 NUMA 节点架构（多 Socket/Die）。跨 Socket 访问内存会导致带宽下降 40% 以上。
     *   我们实现了一个**NUMA 绑核线程池 (`numa_threadpool.h`)**。
@@ -47,30 +47,70 @@
 
 ## 🚀 性能表现 (Performance)
 
-**测试环境**: Huawei Ascend 910B + Kunpeng 920 (64 Cores, 4 NUMA Nodes)
-**测试模型**: Qwen3-MoE (AWQ Quantized)
+**测试环境**: Huawei Ascend 910B + Kunpeng 920 (192 Cores, 8 NUMA Nodes, 4 Sockets)
+**测试模型**: Qwen3-MoE / MiniMax M2 (AWQ Quantized)
 
 ### 1. NPU Kernel 性能 (Decoding Phase)
 对比 PyTorch 原生实现 (Ref) 与本项目自定义 Vector Kernel (Custom)。
 
 | Batch Size | Ref Latency (us) | **Custom Latency (us)** | Ref Bandwidth (GB/s) | **Custom Bandwidth (GB/s)** | **加速比** |
 | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1** | 204.59 | **45.21** | 98.02 | **443.62** | **4.53x** |
-| **2** | 275.07 | **62.27** | 145.81 | **644.11** | **4.42x** |
-| **4** | 503.63 | **97.84** | 159.27 | **819.86** | **5.15x** |
+| **1** | 199.43 | **43.42** | 106.47 | **489.01** | **4.59x** |
+| **2** | 266.82 | **60.49** | 159.16 | **702.07** | **4.41x** |
+| **4** | 515.69 | **96.18** | 164.70 | **883.10** | **5.36x** |
+| **8** | 936.17 | **174.35** | 181.45 | **974.30** | **5.37x** |
 
-### 2. CPU Kernel 性能 (Int8 Fused MoE)
-基于 NUMA 优化的 ARM Int8 算子实测性能。
-*配置: H=2048, I=768, TopK=8, TP=4(2 CPU)*
+> **注**: 测试使用 BF16 精度 scale，更符合实际部署场景。
 
-| Num Tokens | Avg Time (ms) | **Weight Bandwidth (GB/s)** | **Compute (GFLOPS)** | 说明 |
-| :---: | :---: | :---: | :---: | :---: |
-| **1** | 0.53 | **75.74** | 142.57 | 小负载受调度开销影响 |
-| **4** | 1.05 | **152.23** | 286.56 | 接近 PCIe 带宽的 6 倍 |
-| **8** | 1.72 | **186.50** | 351.06 | 达NPU算子带宽的1/5 |
-| **32** | 3.06 | **209.70** | 789.47 | 高吞吐场景 |
+### 2. CPU Kernel 性能 (Int8/Int4 Fused MoE)
+基于 NUMA 优化的 ARM Int8/Int4 算子实测性能。
+*配置: H=2048, I=768, TopK=8, E=128, 权重格式 Int8*
 
-> **结论**: 优化后的 CPU 算子能提供 **~180-210 GB/s** 的有效带宽，远超 PCIe 传输带宽。在 NPU 显存受限时，直接在 CPU 上计算是更优解。
+#### 2 CPU (TP=4, 80 Threads)
+
+| Num Tokens | Avg Time (ms) | **Weight Bandwidth (GB/s)** | **Compute (GFLOPS)** |
+| :---: | :---: | :---: | :---: |
+| **1** | 0.29 | **137.94** | 259.66 |
+| **4** | 0.83 | **193.38** | 364.02 |
+| **8** | 1.45 | **221.69** | 417.29 |
+| **32** | 2.73 | **235.42** | 886.29 |
+| **128** | 4.11 | **155.97** | 2348.74 |
+| **1024** | 21.66 | **29.62** | 3568.60 |
+| **4096** | 84.15 | **7.63** | 3674.75 |
+
+#### 1 CPU (TP=2, 40 Threads)
+
+| Num Tokens | Avg Time (ms) | **Weight Bandwidth (GB/s)** | **Compute (GFLOPS)** |
+| :---: | :---: | :---: | :---: |
+| **1** | 0.49 | **81.92** | 154.20 |
+| **4** | 1.42 | **113.15** | 212.99 |
+| **8** | 2.48 | **129.37** | 243.52 |
+| **32** | 4.70 | **136.48** | 513.81 |
+| **128** | 7.53 | **85.17** | 1282.57 |
+| **1024** | 39.22 | **16.36** | 1971.05 |
+| **4096** | 153.28 | **4.19** | 2017.48 |
+
+> **结论**: 优化后的 CPU 算子在 2 CPU 配置下能提供 **~220+ GB/s** 的有效带宽，远超 PCIe 传输带宽 (~32GB/s)。在 NPU 显存受限时，直接在 CPU 上计算是更优解。
+
+### 3. 端到端性能 (Qwen3-30B-A3B AWQ Int4)
+
+***input_len = 128, output_len = 1024***
+
+#### CPU 推理 (1 Socket, 48 Cores)
+
+| Batch Size | Output Throughput (token/s) | Latency (s) |
+| :---: | :---: | :---: |
+| **1** | 43.91 | 23.78 |
+| **4** | 78.87 | 53.31 |
+| **8** | 110.41 | 76.81 |
+
+#### NPU 推理 (Ascend 910B)
+
+| Batch Size | Output Throughput (token/s) | Latency (s) |
+| :---: | :---: | :---: |
+| **1** | 96.43 | 10.76 |
+| **4** | 286.84 | 14.55 |
+| **8** | 405.01 | 20.50 |
 
 ---
 
@@ -79,7 +119,7 @@
 ### 第一阶段：高性能异构算子库 (Current Focus)
 - [x] **NPU**: 实现 Vector Core 加速的 W4A16 Fused MoE 算子。
 - [x] **CPU**: 实现基于 NUMA 感知的 ARM Int8 Fused MoE 算子。
-- [ ] **CPU**: 升级算子至 **Int4** 精度，进一步降低内存占用并对齐 NPU 量化格式。
+- [x] **CPU**: 升级算子至 **Int4** 精度，进一步降低内存占用并对齐 NPU 量化格式。
 
 ### 第二阶段：动态弹性卸载机制 (Elastic Offloading)
 - [ ] **KV Cache 驱动的弹性伸缩**:
@@ -152,5 +192,5 @@ python3 -m sglang.launch_server \
 ## ⚠️ 限制说明
 
 1.  **硬件依赖**: 必须运行在 **Huawei Ascend 910B** (支持 AIV 指令) 和 **ARMv8.2+ CPU** (支持 dotprod 指令) 环境下。x86 架构无法运行本项目代码。
-2.  **量化格式**: 目前针对 **AWQ** (W4A16) 和 **Int8** 权重格式优化。
-3.  **场景限制**: 极致优化主要针对 **Decoding 阶段 (Small Batch)**。Prefill 阶段的大 Batch 计算目前仍回退到原生实现以保证吞吐量。
+2.  **量化格式**: 目前针对 **AWQ** (W4A16)、**Int8** 和 **Int4** 权重格式优化。Int4 格式与 AWQ 量化对齐，可显著降低内存占用。
+3.  **模型支持**: 已验证支持 **Qwen3-MoE** 系列和 **MiniMax M2** AWQ Int4 量化模型。
