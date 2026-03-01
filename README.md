@@ -139,7 +139,7 @@
 ```text
 MoE-Ascend-Opt
 ├── sglang/                 # 修改适配后的 SGLang 框架
-│   ├── python/sglang/srt/layers/moe/arm_ep_wrapper.py  # 异构分发调度器 (NPU/CPU Router)
+│   ├── python/sglang/srt/layers/moe/moe_offload.py  # 异构分发调度器 (NPU/CPU Router)
 │   └── ...
 ├── sgl-kernel-npu/         # 自定义异构算子库
 │   ├── MoE-Ascend-Opt-main/
