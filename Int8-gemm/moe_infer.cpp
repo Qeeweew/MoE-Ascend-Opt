@@ -127,157 +127,183 @@ void MoEInfer::store_quantized_weights_repack(
     const bool use_bf16 = (gate_up_d.scalar_type() == torch::kBFloat16);
     scale_dtype_ = use_bf16 ? at::kBFloat16 : at::kHalf;
 
+    auto run_tp_parallel = [&](const auto& fn_per_expert) {
+        nanovllm::NumaThreadPool* current_pool = nanovllm::NumaThreadPool::current_thread_pool();
+        int64_t inline_tp = -1;
+        for (int64_t tp = 0; tp < tp_size_; ++tp) {
+            auto exec = nanovllm::NumaExecutorManager::get((int)tp);
+            if (exec->pool.get() == current_pool) {
+                inline_tp = tp;
+                break;
+            }
+        }
+        if (inline_tp < 0 && tp_size_ > 0) {
+            inline_tp = 0;
+        }
+
+        std::vector<std::future<void>> futures;
+        futures.reserve((size_t)(tp_size_ > 0 ? tp_size_ - 1 : 0));
+        for (int64_t tp = 0; tp < tp_size_; ++tp) {
+            auto exec = nanovllm::NumaExecutorManager::get((int)tp);
+            if (tp == inline_tp) {
+                exec->pool->parallel_for_static(0, E, [&](int64_t exp) {
+                    fn_per_expert(tp, exp);
+                });
+                continue;
+            }
+
+            futures.emplace_back(std::async(std::launch::async, [pool = exec->pool, tp, E, &fn_per_expert]() {
+                pool->parallel_for_static(0, E, [&](int64_t exp) {
+                    fn_per_expert(tp, exp);
+                });
+            }));
+        }
+        for (auto& future : futures) {
+            future.get();
+        }
+    };
+
     // Dispatch based on quantization type
     if (quant_type_ == quant::QuantType::Q4_0) {
-        // Q4_0 path: weights are uint32_t (packed 4-bit)
-        TORCH_CHECK(gate_up_qs.scalar_type() == torch::kInt32 || gate_up_qs.scalar_type() ==  torch::kUInt32, "Q4_0 gate_up_qs must be int32 (uint32 storage)");
-        TORCH_CHECK(down_proj_qs.scalar_type() == torch::kInt32 || down_proj_qs.scalar_type() ==  torch::kUInt32, "Q4_0 down_proj_qs must be int32 (uint32 storage)");
+        constexpr int64_t Q4_PACK = 8;
 
-        const uint32_t* src_gate_up_qs  = static_cast<const uint32_t*>(gate_up_qs.data_ptr());
-        const uint32_t* src_down_qs     = static_cast<const uint32_t*>(down_proj_qs.data_ptr());
+        // Q4_0 path: weights are uint32_t (packed 4-bit)
+        TORCH_CHECK(gate_up_qs.scalar_type() == torch::kInt32 || gate_up_qs.scalar_type() == torch::kUInt32,
+                    "Q4_0 gate_up_qs must be int32 (uint32 storage)");
+        TORCH_CHECK(down_proj_qs.scalar_type() == torch::kInt32 || down_proj_qs.scalar_type() == torch::kUInt32,
+                    "Q4_0 down_proj_qs must be int32 (uint32 storage)");
+
+        const uint32_t* src_gate_up_qs = static_cast<const uint32_t*>(gate_up_qs.data_ptr());
+        const uint32_t* src_down_qs = static_cast<const uint32_t*>(down_proj_qs.data_ptr());
 
         // Use uint16_t for scale pointers (simplified handling as per requirements)
         const uint16_t* src_gate_up_d = static_cast<const uint16_t*>(gate_up_d.data_ptr());
         const uint16_t* src_down_d = static_cast<const uint16_t*>(down_proj_d.data_ptr());
 
-        // gate_up: shard on N (rows): [2I, H] -> tp blocks [2Ish, H]
-        for (int64_t exp = 0; exp < num_experts_; ++exp) {
-            for (int64_t tp = 0; tp < tp_size_; ++tp) {
-                const int64_t K   = H;
+        auto repack_gate_up = [&](int64_t tp, int64_t exp) {
+            uint32_t* dst_qs =
+                reinterpret_cast<uint32_t*>(gate_up_qs_tp_[(size_t)tp]) + exp * (2 * Ish * H / Q4_PACK);
+            uint16_t* dst_d =
+                reinterpret_cast<uint16_t*>(gate_up_d_tp_[(size_t)tp]) + exp * (2 * Ish * H_BLK);
 
-                // Base pointers for TP's local buffer
-                uint32_t* dst_qs = (uint32_t*)gate_up_qs_tp_[(size_t)tp] + exp * (2 * Ish * K / 8);
-                uint16_t* dst_d  = reinterpret_cast<uint16_t*>(gate_up_d_tp_[(size_t)tp]) + exp * (2 * Ish * H_BLK);
-
-                // 1) Repack the `gate` portion (N = Ish)
-                const int64_t gate_src_qs = exp * (2 * I * H / 8) + tp * (Ish * K / 8);
-                const int64_t gate_src_d  = exp * (2 * I * H_BLK) + tp * (Ish * H_BLK);
-
-                gemm::repack_B_q4_0<uint16_t>(
-                    Ish, K,
-                    src_gate_up_qs + gate_src_qs,
-                    src_gate_up_d  + gate_src_d,
-                    dst_qs, dst_d
-                );
-
-                // 2) Repack the `up` portion (N = Ish)
-                // Offset source by I rows to reach the `up` matrix
-                const int64_t up_src_qs = exp * (2 * I * H / 8) + I * (K / 8) + tp * (Ish * K / 8);
-                const int64_t up_src_d  = exp * (2 * I * H_BLK) + I * H_BLK + tp * (Ish * H_BLK);
+            auto repack_half = [&](int64_t src_row_offset, uint32_t* half_dst_qs, uint16_t* half_dst_d) {
+                const int64_t src_qs_off =
+                    exp * (2 * I * H / Q4_PACK) + src_row_offset * (H / Q4_PACK) + tp * (Ish * H / Q4_PACK);
+                const int64_t src_d_off =
+                    exp * (2 * I * H_BLK) + src_row_offset * H_BLK + tp * (Ish * H_BLK);
 
                 gemm::repack_B_q4_0<uint16_t>(
-                    Ish, K,
-                    src_gate_up_qs + up_src_qs,
-                    src_gate_up_d  + up_src_d,
-                    dst_qs + Ish * K / 8, // Shift destination by Ish rows
-                    dst_d  + Ish * H_BLK
+                    Ish, H,
+                    src_gate_up_qs + src_qs_off,
+                    src_gate_up_d + src_d_off,
+                    half_dst_qs, half_dst_d
                 );
+            };
+
+            repack_half(/*src_row_offset=*/0, dst_qs, dst_d);
+            repack_half(/*src_row_offset=*/I, dst_qs + Ish * H / Q4_PACK, dst_d + Ish * H_BLK);
+        };
+
+        auto repack_down = [&](int64_t tp, int64_t exp) {
+            thread_local std::vector<uint32_t> tmp_qs;
+            thread_local std::vector<uint16_t> tmp_d;
+            tmp_qs.resize((size_t)H * (size_t)Ish / Q4_PACK);
+            tmp_d.resize((size_t)H * (size_t)Ish_BLK);
+
+            for (int64_t row = 0; row < H; ++row) {
+                const int64_t src_row_qs_off = exp * (H * I / Q4_PACK) + row * (I / Q4_PACK) + tp * (Ish / Q4_PACK);
+                std::memcpy(tmp_qs.data() + row * (Ish / Q4_PACK),
+                            src_down_qs + src_row_qs_off,
+                            (size_t)(Ish / Q4_PACK) * sizeof(uint32_t));
+
+                const int64_t src_row_d_off = exp * (H * I_BLK) + row * I_BLK + tp * Ish_BLK;
+                std::memcpy(tmp_d.data() + row * Ish_BLK,
+                            src_down_d + src_row_d_off,
+                            (size_t)Ish_BLK * sizeof(uint16_t));
             }
-        }
 
-        // down_proj: shard on K (cols): [H, I] -> tp blocks [H, Ish]
-        std::vector<uint32_t> tmp_qs((size_t)H * (size_t)Ish / 8);
-        std::vector<uint16_t> tmp_d ((size_t)H * (size_t)Ish_BLK);
+            uint32_t* dst_qs =
+                reinterpret_cast<uint32_t*>(down_proj_qs_tp_[(size_t)tp]) + exp * (H * Ish / Q4_PACK);
+            uint16_t* dst_d =
+                reinterpret_cast<uint16_t*>(down_proj_d_tp_[(size_t)tp]) + exp * (H * Ish_BLK);
 
-        for (int64_t exp = 0; exp < num_experts_; ++exp) {
-            for (int64_t tp = 0; tp < tp_size_; ++tp) {
-                for (int64_t row = 0; row < H; ++row) {
-                    const int64_t src_row_qs_off = exp * (H * I / 8) + row * (I / 8) + tp * (Ish / 8);
-                    std::memcpy(tmp_qs.data() + row * (Ish / 8),
-                                src_down_qs + src_row_qs_off,
-                                (size_t)(Ish / 8) * sizeof(uint32_t));
+            gemm::repack_B_q4_0<uint16_t>(
+                /*N=*/H, /*K=*/Ish,
+                tmp_qs.data(), tmp_d.data(),
+                dst_qs, dst_d
+            );
+        };
 
-                    const int64_t src_row_d_off = exp * (H * I_BLK) + row * I_BLK + tp * Ish_BLK;
-                    std::memcpy(tmp_d.data() + row * Ish_BLK,
-                                src_down_d + src_row_d_off,
-                                (size_t)Ish_BLK * sizeof(uint16_t));
-                }
-
-                uint32_t* dst_qs = (uint32_t*)down_proj_qs_tp_[(size_t)tp] + exp * (H * Ish / 8);
-                uint16_t* dst_d  = reinterpret_cast<uint16_t*>(down_proj_d_tp_[(size_t)tp]) + exp * (H * Ish_BLK);
-
-                gemm::repack_B_q4_0<uint16_t>(
-                    /*N=*/H, /*K=*/Ish,
-                    tmp_qs.data(), tmp_d.data(),
-                    dst_qs, dst_d
-                );
-            }
-        }
+        run_tp_parallel([&](int64_t tp, int64_t exp) {
+            repack_gate_up(tp, exp);
+            repack_down(tp, exp);
+        });
     } else {
         // Q8_0 path: weights are int8_t
         TORCH_CHECK(gate_up_qs.scalar_type() == torch::kInt8, "Q8_0 gate_up_qs must be int8");
         TORCH_CHECK(down_proj_qs.scalar_type() == torch::kInt8, "Q8_0 down_proj_qs must be int8");
 
         const int8_t* src_gate_up_qs = gate_up_qs.data_ptr<int8_t>();
-        const int8_t* src_down_qs    = down_proj_qs.data_ptr<int8_t>();
+        const int8_t* src_down_qs = down_proj_qs.data_ptr<int8_t>();
 
         // Use uint16_t for scale pointers (simplified handling as per requirements)
         const uint16_t* src_gate_up_d = reinterpret_cast<const uint16_t*>(gate_up_d.data_ptr());
         const uint16_t* src_down_d = reinterpret_cast<const uint16_t*>(down_proj_d.data_ptr());
 
-        // gate_up: shard on N (rows): [2I, H] -> tp blocks [2Ish, H]
-        for (int64_t exp = 0; exp < num_experts_; ++exp) {
-            for (int64_t tp = 0; tp < tp_size_; ++tp) {
-                const int64_t K = H;
+        auto repack_gate_up = [&](int64_t tp, int64_t exp) {
+            int8_t* dst_qs = gate_up_qs_tp_[(size_t)tp] + exp * (2 * Ish * H);
+            uint16_t* dst_d =
+                reinterpret_cast<uint16_t*>(gate_up_d_tp_[(size_t)tp]) + exp * (2 * Ish * H_BLK);
 
-                // Base pointers for TP's local buffer
-                int8_t* dst_qs = gate_up_qs_tp_[(size_t)tp] + exp * (2 * Ish * K);
-                uint16_t* dst_d = reinterpret_cast<uint16_t*>(gate_up_d_tp_[(size_t)tp]) + exp * (2 * Ish * H_BLK);
-
-                // 1) Repack the `gate` portion (N = Ish)
-                const int64_t gate_src_qs = exp * (2 * I * H) + tp * (Ish * K);
-                const int64_t gate_src_d  = exp * (2 * I * H_BLK) + tp * (Ish * H_BLK);
+            auto repack_half = [&](int64_t src_row_offset, int8_t* half_dst_qs, uint16_t* half_dst_d) {
+                const int64_t src_qs_off = exp * (2 * I * H) + src_row_offset * H + tp * (Ish * H);
+                const int64_t src_d_off = exp * (2 * I * H_BLK) + src_row_offset * H_BLK + tp * (Ish * H_BLK);
 
                 gemm::repack_B_q8_0<uint16_t>(
-                    Ish, K,
-                    src_gate_up_qs + gate_src_qs,
-                    src_gate_up_d  + gate_src_d,
-                    dst_qs, dst_d
+                    Ish, H,
+                    src_gate_up_qs + src_qs_off,
+                    src_gate_up_d + src_d_off,
+                    half_dst_qs, half_dst_d
                 );
+            };
 
-                // 2) Repack the `up` portion (N = Ish)
-                // Offset source by I rows to reach the `up` matrix
-                const int64_t up_src_qs = exp * (2 * I * H) + I * K + tp * (Ish * K);
-                const int64_t up_src_d  = exp * (2 * I * H_BLK) + I * H_BLK + tp * (Ish * H_BLK);
+            repack_half(/*src_row_offset=*/0, dst_qs, dst_d);
+            repack_half(/*src_row_offset=*/I, dst_qs + Ish * H, dst_d + Ish * H_BLK);
+        };
 
-                gemm::repack_B_q8_0<uint16_t>(
-                    Ish, K,
-                    src_gate_up_qs + up_src_qs,
-                    src_gate_up_d  + up_src_d,
-                    dst_qs + Ish * K, // Shift destination by Ish rows
-                    dst_d  + Ish * H_BLK
-                );
+        auto repack_down = [&](int64_t tp, int64_t exp) {
+            thread_local std::vector<int8_t> tmp_qs;
+            thread_local std::vector<uint16_t> tmp_d;
+            tmp_qs.resize((size_t)H * (size_t)Ish);
+            tmp_d.resize((size_t)H * (size_t)Ish_BLK);
+
+            for (int64_t row = 0; row < H; ++row) {
+                const int64_t src_row_qs_off = exp * (H * I) + row * I + tp * Ish;
+                std::memcpy(tmp_qs.data() + row * Ish,
+                            src_down_qs + src_row_qs_off,
+                            (size_t)Ish * sizeof(int8_t));
+
+                const int64_t src_row_d_off = exp * (H * I_BLK) + row * I_BLK + tp * Ish_BLK;
+                std::memcpy(tmp_d.data() + row * Ish_BLK,
+                            src_down_d + src_row_d_off,
+                            (size_t)Ish_BLK * sizeof(uint16_t));
             }
-        }
 
-        // down_proj: shard on K (cols): [H, I] -> tp blocks [H, Ish]
-        std::vector<int8_t>   tmp_qs((size_t)H * (size_t)Ish);
-        std::vector<uint16_t> tmp_d ((size_t)H * (size_t)Ish_BLK);
+            int8_t* dst_qs = down_proj_qs_tp_[(size_t)tp] + exp * (H * Ish);
+            uint16_t* dst_d =
+                reinterpret_cast<uint16_t*>(down_proj_d_tp_[(size_t)tp]) + exp * (H * Ish_BLK);
 
-        for (int64_t exp = 0; exp < num_experts_; ++exp) {
-            for (int64_t tp = 0; tp < tp_size_; ++tp) {
-                for (int64_t row = 0; row < H; ++row) {
-                    const int64_t src_row_qs_off = exp * (H * I) + row * I + tp * Ish;
-                    std::memcpy(tmp_qs.data() + row * Ish,
-                                src_down_qs + src_row_qs_off,
-                                (size_t)Ish * sizeof(int8_t));
+            gemm::repack_B_q8_0<uint16_t>(
+                /*N=*/H, /*K=*/Ish,
+                tmp_qs.data(), tmp_d.data(),
+                dst_qs, dst_d
+            );
+        };
 
-                    const int64_t src_row_d_off = exp * (H * I_BLK) + row * I_BLK + tp * Ish_BLK;
-                    std::memcpy(tmp_d.data() + row * Ish_BLK,
-                                src_down_d + src_row_d_off,
-                                (size_t)Ish_BLK * sizeof(uint16_t));
-                }
-
-                int8_t* dst_qs = down_proj_qs_tp_[(size_t)tp] + exp * (H * Ish);
-                uint16_t* dst_d = reinterpret_cast<uint16_t*>(down_proj_d_tp_[(size_t)tp]) + exp * (H * Ish_BLK);
-
-                gemm::repack_B_q8_0<uint16_t>(
-                    /*N=*/H, /*K=*/Ish,
-                    tmp_qs.data(), tmp_d.data(),
-                    dst_qs, dst_d
-                );
-            }
-        }
+        run_tp_parallel([&](int64_t tp, int64_t exp) {
+            repack_gate_up(tp, exp);
+            repack_down(tp, exp);
+        });
     }
 }
 

@@ -9,10 +9,10 @@ import nanovllm_ext
 # =============================================================================
 # 1. Test Parameters
 # =============================================================================
-HIDDEN_SIZE = 2048
-INTERMEDIATE_SIZE = 512
-NUM_EXPERTS = 128
-TOP_K = 10
+HIDDEN_SIZE = 6144
+INTERMEDIATE_SIZE = 2048 
+NUM_EXPERTS = 64
+TOP_K = 8
 
 RENORMALIZE = True
 
@@ -20,7 +20,7 @@ MIN_RUN_TIME_S = 2.0
 NUM_WEIGHT_SETS = 4
 WARMUP_RUNS = 5          # Warmup iterations
 BENCHMARK_RUNS = 50      # Number of benchmark iterations to average
-TOKEN_COUNTS_TO_TEST = list(range(1, 9)) + [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+TOKEN_COUNTS_TO_TEST = list(range(1, 9)) + [16, 32, 64, 128, 256, 512]
 
 # Q4_0 block size
 QK4_0 = 32
@@ -29,7 +29,6 @@ assert HIDDEN_SIZE % 32 == 0
 assert INTERMEDIATE_SIZE % 32 == 0
 
 torch.set_grad_enabled(False)
-torch.set_num_threads(min(32, os.cpu_count() or 1))
 torch.set_num_interop_threads(1)
 
 
@@ -249,6 +248,7 @@ def main():
     moe_handles = []
     for i in range(NUM_WEIGHT_SETS):
         # quant_type=1 for Q4_0
+        print("  Generating weights for set", i + 1)
         handle = torch.classes.nanovllm.MoEInfer(NUM_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE, 1)
         gate_up_qs, gate_up_d, down_qs, down_d = create_dummy_q4_0_weights()
 

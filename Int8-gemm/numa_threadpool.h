@@ -168,6 +168,7 @@ public:
 
     int node() const { return node_; }
     int num_threads() const { return num_threads_; }
+    static NumaThreadPool* current_thread_pool() { return tls_pool_; }
 
     template <class F>
     void parallel_for(int64_t begin, int64_t end, F&& fn) {
