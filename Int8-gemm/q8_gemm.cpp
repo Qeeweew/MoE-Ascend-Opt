@@ -302,9 +302,15 @@ void moe_forward_ptr_impl(
     g_numa_pool.ensure_capacity(num_tokens, hidden_dim, intermediate_shard, tp_size, top_k);
 
     // Safety check: ensure pool was properly initialized
-    if (g_numa_pool.x_qs_ptrs.size() != static_cast<size_t>(tp_size) ||
-        g_numa_pool.x_d_ptrs.size() != static_cast<size_t>(tp_size)) {
-        throw std::runtime_error("NumaBufferPool initialization failed!");
+    if (tp_size > moe::NumaBufferPool::kMaxTpSize) {
+        throw std::runtime_error("tp_size exceeds NumaBufferPool limit 8");
+    }
+    for (int tp = 0; tp < (int)tp_size; ++tp) {
+        if (!g_numa_pool.x_qs_ptrs[tp] || !g_numa_pool.x_d_ptrs[tp] ||
+            !g_numa_pool.expert_out_ptrs[tp] || !g_numa_pool.y_partial_ptrs[tp] ||
+            !g_numa_pool.expert_inter_ptrs[tp]) {
+            throw std::runtime_error("NumaBufferPool initialization failed!");
+        }
     }
 
     const auto& pool_x_qs = g_numa_pool.x_qs_ptrs;

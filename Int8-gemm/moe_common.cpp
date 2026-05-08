@@ -56,11 +56,16 @@ ThreadWorkspace::~ThreadWorkspace() {
 
 void NumaBufferPool::ensure_capacity(int64_t req_tokens, int64_t req_hidden,
                                      int64_t req_inter_shard, int64_t req_tp, int64_t req_topk) {
+    if (req_tp < 1 || req_tp > kMaxTpSize) {
+        throw std::runtime_error("Unsupported tp_size in NumaBufferPool, expected [1, 8], got " +
+                                 std::to_string(req_tp));
+    }
+
     bool shape_changed = (req_hidden != hidden_dim) || (req_inter_shard != intermediate_shard) ||
                         (req_tp != tp_size) || (req_topk != top_k);
     bool size_grew = (req_tokens > (int64_t)capacity_tokens);
 
-    if (!shape_changed && !size_grew && !x_qs_ptrs.empty()) {
+    if (!shape_changed && !size_grew && capacity_tokens > 0 && x_qs_ptrs[0] != nullptr) {
         return;
     }
 
@@ -84,12 +89,6 @@ void NumaBufferPool::ensure_capacity(int64_t req_tokens, int64_t req_hidden,
         capacity_tokens = new_cap;
     }
 
-    x_qs_ptrs.resize(tp_size);
-    x_d_ptrs.resize(tp_size);
-    expert_out_ptrs.resize(tp_size);
-    y_partial_ptrs.resize(tp_size);
-    expert_inter_ptrs.resize(tp_size);
-
     constexpr int QK8_0 = 32;
     const size_t x_qs_sz = capacity_tokens * hidden_dim * sizeof(int8_t);
     const size_t x_d_sz  = capacity_tokens * (hidden_dim / QK8_0) * sizeof(float);
@@ -97,12 +96,13 @@ void NumaBufferPool::ensure_capacity(int64_t req_tokens, int64_t req_hidden,
     const size_t part_sz = capacity_tokens * hidden_dim * sizeof(float);
     const size_t inter_sz = capacity_tokens * top_k * (2 * intermediate_shard) * sizeof(float);
 
-    for (int i = 0; i < tp_size; ++i) {
-        x_qs_ptrs[i] = (int8_t*)numa_alloc_onnode(x_qs_sz, i);
-        x_d_ptrs[i]  = (float*) numa_alloc_onnode(x_d_sz, i);
-        expert_out_ptrs[i] = (float*)numa_alloc_onnode(out_sz, i);
-        y_partial_ptrs[i]  = (float*)numa_alloc_onnode(part_sz, i);
-        expert_inter_ptrs[i] = (float*)numa_alloc_onnode(inter_sz, i);
+    for (int64_t i = 0; i < tp_size; ++i) {
+        const int node = static_cast<int>(i);
+        x_qs_ptrs[i] = (int8_t*)numa_alloc_onnode(x_qs_sz, node);
+        x_d_ptrs[i]  = (float*) numa_alloc_onnode(x_d_sz, node);
+        expert_out_ptrs[i] = (float*)numa_alloc_onnode(out_sz, node);
+        y_partial_ptrs[i]  = (float*)numa_alloc_onnode(part_sz, node);
+        expert_inter_ptrs[i] = (float*)numa_alloc_onnode(inter_sz, node);
 
         if (!x_qs_ptrs[i] || !x_d_ptrs[i] || !expert_out_ptrs[i] || !y_partial_ptrs[i] || !expert_inter_ptrs[i]) {
             throw std::runtime_error("Numa allocation failed for node " + std::to_string(i));
@@ -119,18 +119,18 @@ void NumaBufferPool::free_buffers_unsafe() {
     const size_t part_sz = capacity_tokens * hidden_dim * sizeof(float);
     const size_t inter_sz = capacity_tokens * top_k * (2 * intermediate_shard) * sizeof(float);
 
-    for (size_t i = 0; i < x_qs_ptrs.size(); ++i) {
+    for (int64_t i = 0; i < tp_size; ++i) {
         if (x_qs_ptrs[i]) numa_free(x_qs_ptrs[i], x_qs_sz);
         if (x_d_ptrs[i])  numa_free(x_d_ptrs[i], x_d_sz);
         if (expert_out_ptrs[i]) numa_free(expert_out_ptrs[i], out_sz);
         if (y_partial_ptrs[i])  numa_free(y_partial_ptrs[i], part_sz);
         if (expert_inter_ptrs[i]) numa_free(expert_inter_ptrs[i], inter_sz);
+        x_qs_ptrs[i] = nullptr;
+        x_d_ptrs[i] = nullptr;
+        expert_out_ptrs[i] = nullptr;
+        y_partial_ptrs[i] = nullptr;
+        expert_inter_ptrs[i] = nullptr;
     }
-    x_qs_ptrs.clear();
-    x_d_ptrs.clear();
-    expert_out_ptrs.clear();
-    y_partial_ptrs.clear();
-    expert_inter_ptrs.clear();
 }
 
 NumaBufferPool::~NumaBufferPool() {

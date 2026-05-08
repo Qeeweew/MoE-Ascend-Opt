@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <torch/extension.h>
 #include <vector>
@@ -35,6 +36,8 @@ struct ThreadWorkspace {
 
 // Unified NUMA buffer pool for both Q8_0 and Q4_0
 struct NumaBufferPool {
+    static constexpr int64_t kMaxTpSize = 8;
+
     size_t capacity_tokens = 0;
     int64_t hidden_dim = 0;
     int64_t intermediate_shard = 0;
@@ -42,11 +45,11 @@ struct NumaBufferPool {
     int64_t top_k = 0;
 
     // Per-TP-rank buffers
-    std::vector<int8_t*> x_qs_ptrs;
-    std::vector<float*> x_d_ptrs;
-    std::vector<float*> expert_out_ptrs;
-    std::vector<float*> y_partial_ptrs;
-    std::vector<float*> expert_inter_ptrs;
+    std::array<int8_t*, kMaxTpSize> x_qs_ptrs{};
+    std::array<float*, kMaxTpSize> x_d_ptrs{};
+    std::array<float*, kMaxTpSize> expert_out_ptrs{};
+    std::array<float*, kMaxTpSize> y_partial_ptrs{};
+    std::array<float*, kMaxTpSize> expert_inter_ptrs{};
 
     void ensure_capacity(int64_t req_tokens, int64_t req_hidden,
                         int64_t req_inter_shard, int64_t req_tp, int64_t req_topk);
