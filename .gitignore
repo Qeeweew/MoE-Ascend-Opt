@@ -1,3 +1,14 @@
 .vscode/
 **/build/
 **/*.egg-info/
+
+# compiled extensions
+*.so
+*.o
+
+# logs
+logs/
+
+# python cache
+__pycache__/
+*.pyc

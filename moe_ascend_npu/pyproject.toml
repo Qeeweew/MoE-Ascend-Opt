@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moe-ascend-npu"
+version = "0.1.0"
+description = "MoE Ascend NPU: standalone W4A16 fused-MoE NPU kernels + CPU offload, applied to SGLang via monkey patch"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "sglang",
+    "sgl_kernel_npu",
+    "torch",
+    "torch_npu",
+    "triton",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["moe_ascend_npu*"]
+
+[tool.setuptools.package-data]
+moe_ascend_npu = ["lib/*.so"]

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+build/
+*.egg-info/
+# NPU kernel shared library (built by build_kernels.sh)
+moe_ascend_npu/lib/*.so

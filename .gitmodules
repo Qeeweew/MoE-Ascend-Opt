@@ -1,6 +1,0 @@
-[submodule "sgl-kernel-npu"]
-	path = sgl-kernel-npu
-	url = git@github.com:Qeeweew/sgl-kernel-npu.git
-[submodule "sglang"]
-	path = sglang
-	url = git@github.com:Qeeweew/sglang.git
