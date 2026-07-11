@@ -25,7 +25,7 @@ class ExpertCacheConfig:
     # producing a stable end-to-end gain on the decode workload.
     size: int = 256
     swap_per_update: int = 8
-    update_interval: int = 32
+    update_interval: int = 16
     warmup_steps: int = 16
     decay: float = 0.95
 

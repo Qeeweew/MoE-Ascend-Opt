@@ -5,6 +5,14 @@ import torch
 from moe_ascend_npu.cache import ExpertCacheConfig, ExpertCacheManager
 
 
+def test_default_small_cache_matches_measured_k256_config():
+    config = ExpertCacheConfig()
+    assert config.size == 256
+    assert config.swap_per_update == 8
+    assert config.update_interval == 16
+    assert config.warmup_steps == 16
+
+
 def test_fill_then_replace_with_hysteresis():
     manager = ExpertCacheManager(
         ExpertCacheConfig(size=2, swap_per_update=1, update_interval=1, warmup_steps=0)

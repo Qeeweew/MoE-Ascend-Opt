@@ -278,7 +278,7 @@ bash build_kernels.sh [SOC_VERSION]   # 默认 Ascend910_9382
 | `--enable-moe-expert-cache` | flag | `False` | 启用跨层动态专家缓存；当前支持 compressed-tensors Int4、TP=1 |
 | `--moe-expert-cache-size` | int | `256` | 全局活动 `(layer, expert)` slot 数；不限制运行时 batch size |
 | `--moe-expert-cache-swap-per-update` | int | `8` | 启动填充每轮最大换入数，同时决定备用 slot 数 |
-| `--moe-expert-cache-update-interval` | int | `32` | decode graph replay 更新周期 |
+| `--moe-expert-cache-update-interval` | int | `16` | decode graph replay 更新周期；K=256 默认配置用该值加快冷启动填充，满载后自动退避 |
 | `--moe-expert-cache-warmup-steps` | int | `16` | 开始填充缓存前的有效 decode step 数 |
 | `--moe-expert-cache-decay` | float | `0.95` | 路由频率 EMA 衰减系数 |
 

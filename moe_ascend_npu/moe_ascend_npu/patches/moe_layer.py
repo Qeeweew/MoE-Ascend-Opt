@@ -88,7 +88,7 @@ def apply():
             cache_cfg = ExpertCacheConfig(
                 size=getattr(server_args, "moe_expert_cache_size", 256),
                 swap_per_update=getattr(server_args, "moe_expert_cache_swap_per_update", 8),
-                update_interval=getattr(server_args, "moe_expert_cache_update_interval", 32),
+                update_interval=getattr(server_args, "moe_expert_cache_update_interval", 16),
                 warmup_steps=getattr(server_args, "moe_expert_cache_warmup_steps", 16),
                 decay=getattr(server_args, "moe_expert_cache_decay", 0.95),
             )

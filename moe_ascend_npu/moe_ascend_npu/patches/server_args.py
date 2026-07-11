@@ -23,7 +23,7 @@ def _add_moe_offload_args(parser: argparse.ArgumentParser) -> None:
         "--moe-expert-cache-swap-per-update", type=int, default=8,
         help="Maximum bootstrap fills per update; steady replacement is capped at 8.",
     )
-    parser.add_argument("--moe-expert-cache-update-interval", type=int, default=32)
+    parser.add_argument("--moe-expert-cache-update-interval", type=int, default=16)
     parser.add_argument("--moe-expert-cache-warmup-steps", type=int, default=16)
     parser.add_argument("--moe-expert-cache-decay", type=float, default=0.95)
     parser.add_argument(
@@ -77,7 +77,7 @@ def apply():
             args, "moe_expert_cache_swap_per_update", 8
         )
         server_args.moe_expert_cache_update_interval = getattr(
-            args, "moe_expert_cache_update_interval", 32
+            args, "moe_expert_cache_update_interval", 16
         )
         server_args.moe_expert_cache_warmup_steps = getattr(
             args, "moe_expert_cache_warmup_steps", 16

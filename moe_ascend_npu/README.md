@@ -36,7 +36,7 @@ sglang launch-server \
   --enable-moe-expert-cache \
   --moe-expert-cache-size 256 \
   --moe-expert-cache-swap-per-update 8 \
-  --moe-expert-cache-update-interval 32 \
+  --moe-expert-cache-update-interval 16 \
   --moe-expert-cache-warmup-steps 16
 ```
 
