@@ -21,6 +21,7 @@
     {
       "mode": "cache",
       "k": 128,
+      "update_policy": "fixed_8x_steady_interval",
       "active_cache_gib": 0.31640625,
       "physical_cache_gib": 0.3359375,
       "expert_instance_fraction": 0.0208333333,
@@ -31,6 +32,22 @@
       "local_decode_tps_median": 41.29,
       "speedup_vs_cpu_e2e": 1.0050,
       "speedup_vs_cpu_local_decode": 1.0209
+    },
+    {
+      "mode": "cache",
+      "k": 128,
+      "update_policy": "adaptive_backoff",
+      "active_cache_gib": 0.31640625,
+      "physical_cache_gib": 0.3359375,
+      "expert_instance_fraction": 0.0208333333,
+      "hit_rate_median": 0.2320,
+      "observed_backoff_steps": [256, 512],
+      "latency_s_samples": [10.592424, 8.337141, 8.123023, 8.100412, 8.165149, 8.09348, 8.180722, 8.062807],
+      "latency_s_median_steady": 8.123023,
+      "throughput_tps_median_steady": 39.394,
+      "local_decode_tps_median": 40.77,
+      "speedup_vs_cpu_e2e": 1.0214,
+      "speedup_vs_cpu_local_decode": 1.0080
     }
   ],
   "cpu_remainder_microbenchmark": {

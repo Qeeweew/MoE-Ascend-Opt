@@ -54,9 +54,10 @@ python Int8-gemm/test/benchmark_partial_moe_decode.py --runs 120 --warmup 20
 | 配置 | K | hit rate | E2E median | E2E tok/s | local decode median |
 |---|---:|---:|---:|---:|---:|
 | CPU Q4_0 offload | 0 | 0% | 8.297 s | 38.57 tok/s | 40.45 tok/s |
-| 全局 LFU expert cache | 128 | 约 23.3% | 8.255 s | 38.76 tok/s | 41.29 tok/s |
+| 全局 LFU expert cache，固定 8x 稳态更新 | 128 | 约 23.3% | 8.255 s | 38.76 tok/s | 41.29 tok/s |
+| 全局 LFU expert cache，自适应更新退避 | 128 | 约 23.2% | 8.123 s | 39.39 tok/s | 40.77 tok/s |
 
-K=128 的 local decode 相对 CPU 约 +2.1%，E2E median 约 +0.5%，基本打平。原因是小缓存只覆盖约 23% expert routes，NPU cached kernel、event join、prefill/HTTP 开销和低频 cache update 波动会抵消局部 decode 收益。该结果是固定 8x 稳态更新周期下的基线；后续实现已加入无替换窗口的自适应退避，以降低稳定热点场景下的控制面开销。
+K=128 固定 8x 稳态更新时，local decode 相对 CPU 约 +2.1%，E2E median 约 +0.5%。加入无替换窗口的自适应退避后，日志显示更新周期从 128 step 退到 256 step，再退到 512 step；E2E median 提升到 39.39 tok/s，相对 CPU 约 +2.1%。小缓存只覆盖约 23% expert routes，因此收益仍然温和，但控制面低谷已经被压缩。
 
 这不是整层缓存失败，而是小缓存热点分流的真实边界：当 K 只有 2.08% expert instances 时，收益首先应体现在 CPU remainder 和局部 decode；端到端稳定提升还需要更高的小 K 命中率或更低控制面开销。
 
@@ -64,7 +65,7 @@ K=128 的 local decode 相对 CPU 约 +2.1%，E2E median 约 +0.5%，基本打�
 
 1. 小缓存全局 expert pool 可以在只缓存 2.08% expert instances 时获得约 23.3% routing hit rate，说明 Qwen3 decode routing 存在可利用热点。
 2. CPU remainder 已验证接近按 active expert 数线性下降：TopK=8 时少 1 个 CPU route，延迟下降 12.54%。
-3. K=128 的端到端收益仍不足，local decode 约 +2.1%，E2E 约 +0.5%。当前瓶颈不再是“CPU 少算一个 expert 不变快”，而是小 K hit rate 和 cache 控制面开销；稳态无替换时的更新退避是下一步直接优化点。
+3. K=128 加入稳态更新退避后，E2E 约 +2.1%。当前瓶颈不再是“CPU 少算一个 expert 不变快”，而是小 K hit rate 仍只有约 23%。
 4. 当前方案坚持全局 LFU expert pool，不采用整层缓存或 layer 过滤；大 K/整层实验仅作为历史上界，不作为论文第三部分的主方案。
 
 ## 复现
