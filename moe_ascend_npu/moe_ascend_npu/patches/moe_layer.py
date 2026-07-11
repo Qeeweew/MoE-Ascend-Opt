@@ -86,7 +86,7 @@ def apply():
                     "compressed-tensors Int4 MoE model"
                 )
             cache_cfg = ExpertCacheConfig(
-                size=getattr(server_args, "moe_expert_cache_size", 64),
+                size=getattr(server_args, "moe_expert_cache_size", 128),
                 swap_per_update=getattr(server_args, "moe_expert_cache_swap_per_update", 8),
                 update_interval=getattr(server_args, "moe_expert_cache_update_interval", 32),
                 warmup_steps=getattr(server_args, "moe_expert_cache_warmup_steps", 16),

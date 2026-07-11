@@ -34,7 +34,7 @@ sglang launch-server \
   --model-path /mnt/models/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32 \
   --attention-backend ascend \
   --enable-moe-expert-cache \
-  --moe-expert-cache-size 64 \
+  --moe-expert-cache-size 128 \
   --moe-expert-cache-swap-per-update 8 \
   --moe-expert-cache-update-interval 32 \
   --moe-expert-cache-warmup-steps 16
@@ -45,7 +45,8 @@ captured once; LFU replacement is driven by a hook immediately before graph
 replay and does not recapture the graph. ``--enable-moe-expert-cache`` and
 ``--enable-moe-offload`` are mutually exclusive. The configured update interval
 is used while filling; after the cache is full, the controller automatically
-uses an 8x longer steady-state interval.
+backs off to a longer steady-state interval when replacement stops changing the
+working set.
 
 ## What the package provides
 

@@ -20,6 +20,22 @@
     },
     {
       "mode": "cache",
+      "k": 64,
+      "update_policy": "adaptive_backoff",
+      "active_cache_gib": 0.158203125,
+      "physical_cache_gib": 0.177978515625,
+      "expert_instance_fraction": 0.0104166667,
+      "hit_rate_median": 0.1322,
+      "observed_backoff_steps": [256, 512],
+      "latency_s_samples": [9.973838, 8.635867, 8.636684, 8.498819, 8.673869, 8.545625, 8.558281, 8.563546],
+      "latency_s_median_steady": 8.563546,
+      "throughput_tps_median_steady": 37.368,
+      "local_decode_tps_median": 38.855,
+      "speedup_vs_cpu_e2e": 0.9688,
+      "speedup_vs_cpu_local_decode": 0.9607
+    },
+    {
+      "mode": "cache",
       "k": 128,
       "update_policy": "fixed_8x_steady_interval",
       "active_cache_gib": 0.31640625,
@@ -48,6 +64,42 @@
       "local_decode_tps_median": 40.77,
       "speedup_vs_cpu_e2e": 1.0214,
       "speedup_vs_cpu_local_decode": 1.0080
+    },
+    {
+      "mode": "cache",
+      "k": 256,
+      "update_policy": "adaptive_backoff",
+      "active_cache_gib": 0.6328125,
+      "physical_cache_gib": 0.652587890625,
+      "expert_instance_fraction": 0.0416666667,
+      "hit_rate_median": 0.3832,
+      "observed_backoff_steps": [256, 512],
+      "latency_s_samples": [11.202112, 9.567321, 7.860491, 7.663538, 7.934776, 7.542644, 7.74964, 7.595205],
+      "latency_s_median_steady": 7.74964,
+      "throughput_tps_median_steady": 41.292,
+      "local_decode_tps_median": 43.455,
+      "speedup_vs_cpu_e2e": 1.0706,
+      "speedup_vs_cpu_local_decode": 1.0744
+    },
+    {
+      "mode": "cache",
+      "k": 512,
+      "update_policy": "adaptive_backoff",
+      "active_cache_gib": 1.265625,
+      "physical_cache_gib": 1.285400390625,
+      "expert_instance_fraction": 0.0833333333,
+      "hit_rate_median": 0.5762,
+      "observed_backoff_steps": [],
+      "replacement_state": "still_replacing_within_8_request_window",
+      "latency_s_samples": [10.951254, 10.0442, 9.434635, 7.552983, 7.211446, 7.051009, 7.09226, 6.982018],
+      "latency_s_median_steady": 7.211446,
+      "throughput_tps_median_steady": 44.374,
+      "latency_s_median_post_fill_runs_4_to_8": 7.09226,
+      "throughput_tps_post_fill_runs_4_to_8": 45.120,
+      "local_decode_tps_median": 48.83,
+      "speedup_vs_cpu_e2e": 1.1505,
+      "speedup_vs_cpu_post_fill": 1.1698,
+      "speedup_vs_cpu_local_decode": 1.2073
     }
   ],
   "cpu_remainder_microbenchmark": {
@@ -69,5 +121,5 @@
       "speedup_vs_cpu": 1.038208944
     }
   ],
-  "exact_text_hash_match_cpu_vs_k128": true
+  "exact_text_hash_match_cpu_vs_cache_runs": true
 }
