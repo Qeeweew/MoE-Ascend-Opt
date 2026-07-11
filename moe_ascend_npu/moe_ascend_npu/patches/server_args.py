@@ -18,9 +18,9 @@ def _add_moe_offload_args(parser: argparse.ArgumentParser) -> None:
         "--enable-moe-expert-cache", action="store_true",
         help="Enable graph-compatible dynamic Int4 expert caching with CPU fallback.",
     )
-    parser.add_argument("--moe-expert-cache-size", type=int, default=512)
+    parser.add_argument("--moe-expert-cache-size", type=int, default=64)
     parser.add_argument(
-        "--moe-expert-cache-swap-per-update", type=int, default=64,
+        "--moe-expert-cache-swap-per-update", type=int, default=8,
         help="Maximum bootstrap fills per update; steady replacement is capped at 8.",
     )
     parser.add_argument("--moe-expert-cache-update-interval", type=int, default=32)
@@ -76,9 +76,9 @@ def apply():
             args, "moe_offload_quant_type", "q8_0"
         )
         server_args.enable_moe_expert_cache = getattr(args, "enable_moe_expert_cache", False)
-        server_args.moe_expert_cache_size = getattr(args, "moe_expert_cache_size", 512)
+        server_args.moe_expert_cache_size = getattr(args, "moe_expert_cache_size", 64)
         server_args.moe_expert_cache_swap_per_update = getattr(
-            args, "moe_expert_cache_swap_per_update", 64
+            args, "moe_expert_cache_swap_per_update", 8
         )
         server_args.moe_expert_cache_update_interval = getattr(
             args, "moe_expert_cache_update_interval", 32

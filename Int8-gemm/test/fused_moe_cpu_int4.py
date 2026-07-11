@@ -288,6 +288,25 @@ def main():
         if rel_rmse > 0.1:
             print(f"WARNING: rel_rmse {rel_rmse:.6f} is higher than expected!")
 
+    # Expert-cache remainder: cached routes are represented by -1.  Exercise
+    # the decode team sizes that differ from the ordinary TopK=8 path.
+    print("\n=== Partial-route decode correctness ===")
+    x = torch.randn(1, HIDDEN_SIZE, dtype=torch.float16).contiguous()
+    full_ids = torch.arange(TOP_K, dtype=torch.int32).view(1, TOP_K)
+    topk_w = torch.full((1, TOP_K), 1.0 / TOP_K, dtype=torch.float32)
+    for cpu_routes in (1, 2, 4, TOP_K):
+        partial_ids = full_ids.clone()
+        partial_ids[:, cpu_routes:] = -1
+        y_ext = torch.ops.nanovllm.moe_forward(x, partial_ids, topk_w, handle)
+        y_ref = reference_moe_fp16(
+            x, partial_ids, topk_w, w_gate_fp16, w_up_fp16, w_down_fp16
+        )
+        rel_rmse = torch.linalg.vector_norm((y_ext - y_ref).float()) / (
+            torch.linalg.vector_norm(y_ref.float()) + 1e-12
+        )
+        print(f"cpu_routes={cpu_routes}: rel_rmse={rel_rmse.item():.6f}")
+        assert rel_rmse.item() < 0.1
+
     print("\nAll tests finished.")
 
 

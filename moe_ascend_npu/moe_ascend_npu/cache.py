@@ -20,8 +20,10 @@ except ImportError:  # CPU-only policy tests do not require SGLang.
 
 @dataclass(frozen=True)
 class ExpertCacheConfig:
-    size: int = 512
-    swap_per_update: int = 64
+    # Cache a small hot working set across all layers.  Large K values remain
+    # useful for upper-bound experiments but are not the intended deployment.
+    size: int = 64
+    swap_per_update: int = 8
     update_interval: int = 32
     warmup_steps: int = 16
     decay: float = 0.95
@@ -178,10 +180,14 @@ class ExpertCacheManager:
             if (self.replay_steps - self.config.warmup_steps) % interval:
                 return
 
-            # The callbacks that produced this window are stream ordered.  A
-            # low-frequency sync makes their CPU counters safe to snapshot;
-            # swaps themselves are then enqueued before the next replay.
-            torch.npu.synchronize()
+            # Routing counters are protected inside MoEInfer.  Taking a
+            # snapshot concurrently with a callback is safe: a callback that
+            # finishes after this snapshot is simply counted in the next
+            # window.  Do not globally synchronize here; on decode that pause
+            # is substantially more expensive than the small-cache compute it
+            # is intended to save.  Cache copies/table publication below are
+            # enqueued on the main stream before the next replay and therefore
+            # remain stream ordered.
             self._collect_stats()
             self._rebalance()
 
@@ -201,7 +207,6 @@ class ExpertCacheManager:
             "[ExpertCache] step=%d active=%d window_hit=%.2f%% swaps=%d",
             self.replay_steps, len(self.owner_slot), hit_rate * 100, self.total_swaps,
         )
-
     def _rebalance(self) -> None:
         for owner in list(self.cooldown):
             self.cooldown[owner] -= 1

@@ -104,7 +104,8 @@ void NumaBufferPool::ensure_capacity(int64_t req_tokens, int64_t req_hidden,
         y_partial_ptrs[i]  = (float*)numa_alloc_onnode(part_sz, node);
         expert_inter_ptrs[i] = (float*)numa_alloc_onnode(inter_sz, node);
 
-        if (!x_qs_ptrs[i] || !x_d_ptrs[i] || !expert_out_ptrs[i] || !y_partial_ptrs[i] || !expert_inter_ptrs[i]) {
+        if (!x_qs_ptrs[i] || !x_d_ptrs[i] || !expert_out_ptrs[i] ||
+            !y_partial_ptrs[i] || !expert_inter_ptrs[i]) {
             throw std::runtime_error("Numa allocation failed for node " + std::to_string(i));
         }
     }

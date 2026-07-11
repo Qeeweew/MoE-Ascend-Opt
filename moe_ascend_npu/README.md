@@ -34,8 +34,8 @@ sglang launch-server \
   --model-path /mnt/models/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32 \
   --attention-backend ascend \
   --enable-moe-expert-cache \
-  --moe-expert-cache-size 512 \
-  --moe-expert-cache-swap-per-update 64 \
+  --moe-expert-cache-size 64 \
+  --moe-expert-cache-swap-per-update 8 \
   --moe-expert-cache-update-interval 32 \
   --moe-expert-cache-warmup-steps 16
 ```

@@ -385,12 +385,33 @@ void moe_forward_ptr_impl(
             // --- Stage B: Expert Compute ---
             const int pool_num_threads = exec->pool->num_threads();
 
-            if (global_tasks.size() * 2 <= (size_t)pool_num_threads) {
-                // Optimization: Direct thread-id based task assignment when tasks are few
-                const int num_active_threads = (int)global_tasks.size() * 2;
+            if (!global_tasks.empty() && global_tasks.size() <= (size_t)pool_num_threads) {
+                // Decode/small-batch path.  Expert caching deliberately reduces
+                // the number of CPU expert tasks.  Keeping the old fixed two
+                // threads per task made that win self-defeating: one remaining
+                // cold expert used only two cores.  Form an equal-sized team for
+                // every active task instead and split both GEMMs' output columns
+                // across the team.  Column boundaries are expressed in groups
+                // of eight so packed Q4 offsets remain valid; H and Ish are
+                // already multiples of QK8_0.
+                // Two lanes per original TopK route is the established all-CPU
+                // decode budget.  Expert-cache hits change the objective: the
+                // CPU remainder must finish sooner, not merely keep the same
+                // per-expert lane count.  When some routes were removed, spend
+                // the full NUMA node budget on the remaining cold experts.
+                const int full_cpu_route_count = (int)num_tokens * (int)top_k;
+                const bool has_cache_hits = total_expert_tokens < full_cpu_route_count;
+                const int all_cpu_budget = std::max(1, 2 * (int)top_k);
+                const int decode_thread_budget = has_cache_hits
+                    ? pool_num_threads
+                    : std::min(pool_num_threads, all_cpu_budget);
+                const int threads_per_task = std::max(
+                    1, decode_thread_budget / (int)global_tasks.size());
+                const int num_active_threads =
+                    (int)global_tasks.size() * threads_per_task;
                 exec->pool->execute_per_thread(num_active_threads, [&](int tid) {
-                    const int task_idx = tid / 2;
-                    const int split_idx = tid % 2;
+                    const int task_idx = tid / threads_per_task;
+                    const int lane = tid % threads_per_task;
 
                     const MoeTask& task = global_tasks[task_idx];
                     ws.ensure_size(M_BLOCK, (int)hidden_dim, (int)intermediate_shard);
@@ -405,7 +426,15 @@ void moe_forward_ptr_impl(
                     const int64_t Ish_BLK = Ish / QK8_0;
 
                     // ============ Phase 1: GEMM 1 Split ============
-                    const int64_t col_offset = split_idx * Ish;
+                    constexpr int64_t COL_GROUP = 8;
+                    const int64_t gate_up_groups = (2 * Ish) / COL_GROUP;
+                    const int64_t gate_up_begin_group =
+                        gate_up_groups * lane / threads_per_task;
+                    const int64_t gate_up_end_group =
+                        gate_up_groups * (lane + 1) / threads_per_task;
+                    const int64_t col_offset = gate_up_begin_group * COL_GROUP;
+                    const int64_t gate_up_cols =
+                        (gate_up_end_group - gate_up_begin_group) * COL_GROUP;
 
                     // Type-safe weight pointer access based on quantization type
                     using StorageType = typename quant::QuantTraits<QT>::storage_type;
@@ -427,7 +456,8 @@ void moe_forward_ptr_impl(
                     const B_SCALE_TYPE* gate_up_d_ptr = gate_up_d_tp[tp] + (int64_t)exp_id * (2 * Ish) * H_BLK
                                                       + col_offset * H_BLK;
 
-                    float* shared_inter_out = pool_expert_inter[tp] + (int64_t)task_idx * (2 * Ish) + col_offset;
+                    float* shared_inter_out =
+                        pool_expert_inter[tp] + (int64_t)global_start_pos * (2 * Ish) + col_offset;
 
                     // 1. Pack A
                     gemm::pack_A_q8_0_from_quantized_indirect(
@@ -439,7 +469,7 @@ void moe_forward_ptr_impl(
                     // 2. GEMM 1 Partial - Dispatch based on quantization type
                     if constexpr (QT == quant::QuantType::Q8_0) {
                         gemm::gemm_q8_0_compute_packed(
-                            count, (int)Ish, (int)hidden_dim,
+                            count, (int)gate_up_cols, (int)hidden_dim,
                             ws.A_qs_packed1, ws.A_d_packed1,
                             gate_up_qs_ptr,
                             gate_up_d_ptr,
@@ -447,7 +477,7 @@ void moe_forward_ptr_impl(
                         );
                     } else {
                         gemm::gemm_q4_0_compute_packed(
-                            count, (int)Ish, (int)hidden_dim,
+                            count, (int)gate_up_cols, (int)hidden_dim,
                             ws.A_qs_packed1, ws.A_d_packed1,
                             gate_up_qs_ptr,
                             gate_up_d_ptr,
@@ -459,7 +489,8 @@ void moe_forward_ptr_impl(
                     exec->pool->barrier();
 
                     // ============ Phase 2: SiLU + GEMM 2 Split ============
-                    float* shared_inter_in = pool_expert_inter[tp] + (int64_t)task_idx * (2 * Ish);
+                    float* shared_inter_in =
+                        pool_expert_inter[tp] + (int64_t)global_start_pos * (2 * Ish);
 
                     std::memcpy(ws.expert_intermediate1, shared_inter_in, count * (2 * Ish) * sizeof(float));
                     gemm::silu_and_mul(ws.expert_intermediate1, count, (int)(2 * Ish));
@@ -470,9 +501,14 @@ void moe_forward_ptr_impl(
                         ws.A_qs_packed2, ws.A_d_packed2
                     );
 
-                    const int64_t H_split = H / 2;
-                    const int64_t N_chunk = (split_idx == 0) ? H_split : (H - H_split);
-                    const int64_t col_offset2 = split_idx * H_split;
+                    const int64_t down_groups = H / COL_GROUP;
+                    const int64_t down_begin_group =
+                        down_groups * lane / threads_per_task;
+                    const int64_t down_end_group =
+                        down_groups * (lane + 1) / threads_per_task;
+                    const int64_t col_offset2 = down_begin_group * COL_GROUP;
+                    const int64_t N_chunk =
+                        (down_end_group - down_begin_group) * COL_GROUP;
 
                     const StorageType* down_qs_ptr = down_proj_qs_typed[tp] 
                         + (int64_t)exp_id * H * Ish / (QT == quant::QuantType::Q4_0 ? 8 : 1)
