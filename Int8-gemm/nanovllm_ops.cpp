@@ -124,6 +124,9 @@ struct MoECpuTaskArgs {
     void* y_out_ptr;
     const float* topk_weights_ptr;
     const int32_t* topk_ids_ptr;
+    const int32_t* routing_ids_ptr = nullptr;
+    MoEInfer* moe_impl = nullptr;
+    bool record_routing = false;
     const void* const* gate_up_qs_tp;
     const void* const* gate_up_d_tp;
     const void* const* down_proj_qs_tp;
@@ -139,6 +142,11 @@ struct MoECpuTaskArgs {
 // Direct callback - calls execute_fn directly, no intermediate function
 static void moe_compute_callback(void* user_data) {
     auto* args = reinterpret_cast<MoECpuTaskArgs*>(user_data);
+    if (args->record_routing && args->moe_impl != nullptr && args->routing_ids_ptr != nullptr) {
+        args->moe_impl->record_routing(
+            args->routing_ids_ptr, args->topk_ids_ptr,
+            args->num_tokens, args->top_k);
+    }
     args->execute_fn(
         args->x_in_ptr,
         args->y_out_ptr,
@@ -158,7 +166,7 @@ static void moe_compute_callback(void* user_data) {
 }
 
 struct MoEGraphContext : torch::CustomClassHolder {
-    PinnedBuffer hidden_in, hidden_out, topk_ids, topk_w;
+    PinnedBuffer hidden_in, hidden_out, topk_ids, routing_ids, topk_w;
     MoECpuTaskArgs args;
 
     MoEGraphContext(const c10::intrusive_ptr<MoEInferHandle>& moe_h,
@@ -180,11 +188,14 @@ struct MoEGraphContext : torch::CustomClassHolder {
         hidden_in.alloc(hb);
         hidden_out.alloc(hb);
         topk_ids.alloc(ib);
+        routing_ids.alloc(ib);
         topk_w.alloc(wb);
 
         args.x_in_ptr = hidden_in.ptr;
         args.y_out_ptr = hidden_out.ptr;
         args.topk_ids_ptr = (const int32_t*)topk_ids.ptr;
+        args.routing_ids_ptr = (const int32_t*)routing_ids.ptr;
+        args.moe_impl = moe_h->impl.get();
         args.topk_weights_ptr = (const float*)topk_w.ptr;
         args.num_tokens = num_tokens;
         args.top_k = top_k;
@@ -203,7 +214,7 @@ struct MoEGraphContext : torch::CustomClassHolder {
 struct StreamCallData {
     int device_id = 0;
     MoECpuTaskArgs args;
-    PinnedBuffer hidden_in, hidden_out, topk_ids, topk_w;
+    PinnedBuffer hidden_in, hidden_out, topk_ids, routing_ids, topk_w;
 };
 
 static void moe_cleanup_callback(void* user_data) {
@@ -304,6 +315,65 @@ static torch::Tensor moe_forward_npu_stream(
     return out_npu;
 }
 
+// Cache partial variant.  ``compute_ids`` contains -1 for cache hits while
+// ``routing_ids`` preserves the original expert ids for LFU telemetry.
+static torch::Tensor moe_forward_npu_stream_partial(
+    const torch::Tensor& hidden_npu,
+    const torch::Tensor& compute_ids_npu,
+    const torch::Tensor& routing_ids_npu,
+    const torch::Tensor& topk_w_npu,
+    const c10::intrusive_ptr<MoEInferHandle>& moe_h)
+{
+    auto out_npu = torch::empty_like(hidden_npu);
+    const int64_t tokens = hidden_npu.size(0);
+    const int64_t top_k = compute_ids_npu.size(1);
+    TORCH_CHECK(compute_ids_npu.sizes() == routing_ids_npu.sizes(),
+                "compute_ids and routing_ids shape mismatch");
+
+    auto* cd = new StreamCallData();
+    cd->device_id = hidden_npu.get_device();
+    const size_t hb = hidden_npu.nbytes();
+    const size_t ib = compute_ids_npu.nbytes();
+    const size_t wb = topk_w_npu.nbytes();
+    cd->hidden_in.alloc(hb); cd->hidden_out.alloc(hb);
+    cd->topk_ids.alloc(ib); cd->routing_ids.alloc(ib); cd->topk_w.alloc(wb);
+
+    cd->args.execute_fn = moe_h->impl->get_execute_function(hidden_npu.scalar_type());
+    cd->args.x_in_ptr = cd->hidden_in.ptr;
+    cd->args.y_out_ptr = cd->hidden_out.ptr;
+    cd->args.topk_ids_ptr = (const int32_t*)cd->topk_ids.ptr;
+    cd->args.routing_ids_ptr = (const int32_t*)cd->routing_ids.ptr;
+    cd->args.moe_impl = moe_h->impl.get();
+    cd->args.record_routing = true;
+    cd->args.topk_weights_ptr = (const float*)cd->topk_w.ptr;
+    cd->args.num_tokens = tokens; cd->args.top_k = top_k;
+    cd->args.hidden_size = moe_h->impl->hidden_size();
+    cd->args.num_experts = moe_h->impl->num_experts();
+    cd->args.intermediate_size = moe_h->impl->intermediate_size();
+    cd->args.tp_size = moe_h->impl->tp_size();
+    cd->args.gate_up_qs_tp = moe_h->impl->gate_up_qs_tp_data();
+    cd->args.gate_up_d_tp = moe_h->impl->gate_up_d_tp_data();
+    cd->args.down_proj_qs_tp = moe_h->impl->down_proj_qs_tp_data();
+    cd->args.down_proj_d_tp = moe_h->impl->down_proj_d_tp_data();
+
+    aclrtStream stream = current_acl_stream(hidden_npu.get_device());
+    TORCH_CHECK(aclrtMemcpyAsync(cd->hidden_in.ptr, hb, hidden_npu.data_ptr(), hb,
+                                ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(cd->topk_ids.ptr, ib, compute_ids_npu.data_ptr(), ib,
+                                ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(cd->routing_ids.ptr, ib, routing_ids_npu.data_ptr(), ib,
+                                ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(cd->topk_w.ptr, wb, topk_w_npu.data_ptr(), wb,
+                                ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtLaunchCallback(moe_compute_callback, (void*)&cd->args,
+                                   ACL_CALLBACK_BLOCK, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(out_npu.data_ptr(), hb, cd->hidden_out.ptr, hb,
+                                ACL_MEMCPY_HOST_TO_DEVICE, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtLaunchCallback(moe_cleanup_callback, (void*)cd,
+                                   ACL_CALLBACK_BLOCK, stream) == ACL_SUCCESS);
+    return out_npu;
+}
+
 // graph-safe out variant
 static void moe_forward_npu_graph_out(
     const torch::Tensor& hidden_npu,
@@ -338,6 +408,37 @@ static void moe_forward_npu_graph_out(
 
     TORCH_CHECK(aclrtMemcpyAsync(out_npu.data_ptr(), hb,
                                 ctx->hidden_out.ptr, ctx->hidden_out.size,
+                                ACL_MEMCPY_HOST_TO_DEVICE, stream) == ACL_SUCCESS);
+}
+
+static void moe_forward_npu_graph_partial_out(
+    const torch::Tensor& hidden_npu,
+    const torch::Tensor& compute_ids_npu,
+    const torch::Tensor& routing_ids_npu,
+    const torch::Tensor& topk_w_npu,
+    const c10::intrusive_ptr<MoEInferHandle>& moe_h,
+    const c10::intrusive_ptr<MoEGraphContext>& ctx,
+    torch::Tensor& out_npu)
+{
+    (void)moe_h;
+    TORCH_CHECK(compute_ids_npu.sizes() == routing_ids_npu.sizes(),
+                "compute_ids and routing_ids shape mismatch");
+    aclrtStream stream = current_acl_stream(hidden_npu.get_device());
+    const size_t hb = hidden_npu.nbytes();
+    const size_t ib = compute_ids_npu.nbytes();
+    const size_t wb = topk_w_npu.nbytes();
+    ctx->args.record_routing = true;
+    TORCH_CHECK(aclrtMemcpyAsync(ctx->hidden_in.ptr, ctx->hidden_in.size,
+                                hidden_npu.data_ptr(), hb, ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(ctx->topk_ids.ptr, ctx->topk_ids.size,
+                                compute_ids_npu.data_ptr(), ib, ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(ctx->routing_ids.ptr, ctx->routing_ids.size,
+                                routing_ids_npu.data_ptr(), ib, ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(ctx->topk_w.ptr, ctx->topk_w.size,
+                                topk_w_npu.data_ptr(), wb, ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtLaunchCallback(moe_compute_callback, (void*)&ctx->args,
+                                   ACL_CALLBACK_BLOCK, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(out_npu.data_ptr(), hb, ctx->hidden_out.ptr, ctx->hidden_out.size,
                                 ACL_MEMCPY_HOST_TO_DEVICE, stream) == ACL_SUCCESS);
 }
 #endif
@@ -388,6 +489,18 @@ TORCH_LIBRARY_FRAGMENT(nanovllm, m) {
         .def("get_intermediate_size",
              [](const c10::intrusive_ptr<MoEInferHandle>& self) {
                  return self->impl->intermediate_size();
+             })
+        .def("set_valid_tokens",
+             [](const c10::intrusive_ptr<MoEInferHandle>& self, int64_t n) {
+                 self->impl->set_valid_tokens(n);
+             })
+        .def("take_routing_stats",
+             [](const c10::intrusive_ptr<MoEInferHandle>& self) {
+                 return self->impl->take_routing_stats();
+             })
+        .def("reset_routing_stats",
+             [](const c10::intrusive_ptr<MoEInferHandle>& self) {
+                 self->impl->reset_routing_stats();
              });
 
 #ifdef WITH_NPU
@@ -403,7 +516,9 @@ TORCH_LIBRARY_FRAGMENT(nanovllm, m) {
 
 #ifdef WITH_NPU
     m.def("moe_forward_npu_stream(Tensor hidden, Tensor topk_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe) -> Tensor");
+    m.def("moe_forward_npu_stream_partial(Tensor hidden, Tensor compute_ids, Tensor routing_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe) -> Tensor");
     m.def("moe_forward_npu_graph_out(Tensor hidden, Tensor topk_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe, __torch__.torch.classes.nanovllm.MoEGraphContext ctx, Tensor(a!) out) -> ()");
+    m.def("moe_forward_npu_graph_partial_out(Tensor hidden, Tensor compute_ids, Tensor routing_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe, __torch__.torch.classes.nanovllm.MoEGraphContext ctx, Tensor(a!) out) -> ()");
 #endif
 }
 
@@ -414,6 +529,7 @@ TORCH_LIBRARY_IMPL(nanovllm, CPU, m) {
 #ifdef WITH_NPU
 TORCH_LIBRARY_IMPL(nanovllm, PrivateUse1, m) {
     m.impl("moe_forward_npu_stream", &moe_forward_npu_stream);
+    m.impl("moe_forward_npu_stream_partial", &moe_forward_npu_stream_partial);
     m.impl("moe_forward_npu_graph_out",
            [](const torch::Tensor& hidden,
               const torch::Tensor& ids,
@@ -422,6 +538,16 @@ TORCH_LIBRARY_IMPL(nanovllm, PrivateUse1, m) {
               const c10::intrusive_ptr<MoEGraphContext>& ctx,
               torch::Tensor out) {
                moe_forward_npu_graph_out(hidden, ids, w, moe, ctx, out);
+           });
+    m.impl("moe_forward_npu_graph_partial_out",
+           [](const torch::Tensor& hidden,
+              const torch::Tensor& compute_ids,
+              const torch::Tensor& routing_ids,
+              const torch::Tensor& w,
+              const c10::intrusive_ptr<MoEInferHandle>& moe,
+              const c10::intrusive_ptr<MoEGraphContext>& ctx,
+              torch::Tensor out) {
+               moe_forward_npu_graph_partial_out(hidden, compute_ids, routing_ids, w, moe, ctx, out);
            });
 }
 #endif

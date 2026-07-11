@@ -26,6 +26,27 @@ sglang launch-server --model-path /path/to/Qwen3-MoE-AWQ --attention-backend asc
 sglang launch-server --model-path ... --enable-moe-offload --moe-offload-quant-type q4_0 ...
 ```
 
+Dynamic expert caching (compressed-tensors Int4, TP=1):
+
+```bash
+export NANOVLLM_TP_SIZE=2
+sglang launch-server \
+  --model-path /mnt/models/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32 \
+  --attention-backend ascend \
+  --enable-moe-expert-cache \
+  --moe-expert-cache-size 512 \
+  --moe-expert-cache-swap-per-update 64 \
+  --moe-expert-cache-update-interval 32 \
+  --moe-expert-cache-warmup-steps 16
+```
+
+Do not pass ``--disable-cuda-graph``. The fixed cache tensors and slot table are
+captured once; LFU replacement is driven by a hook immediately before graph
+replay and does not recapture the graph. ``--enable-moe-expert-cache`` and
+``--enable-moe-offload`` are mutually exclusive. The configured update interval
+is used while filling; after the cache is full, the controller automatically
+uses an 8x longer steady-state interval.
+
 ## What the package provides
 
 ### 1. W4A16 fused-MoE NPU kernels (decoding / small batch)
@@ -38,6 +59,7 @@ under the `moe_ascend_npu` torch namespace:
 | :-- | :-- |
 | `grouped_gemv_w4a16_moe` | `(x[?,K], w[E,K,N//8], scales[E,K//g,N], expert_ids) -> y` |
 | `fused_moe_w4a16_small_bs` | `(x[BS,K], w13, s13, w2, s2, expert_ids[BS,TopK], topk_w[BS,TopK]) -> y[BS,K]` |
+| `fused_moe_w4a16_cached` | Same computation with cache `slot_ids`; `-1` routes contribute zero |
 | `batch_gemm_w4a16_small_bs` | `(x[BS<=4,K], w[K,N//8], scales[K//g,N]) -> y[BS,N]` |
 
 Plus the Triton `repack_int4_npu` weight-repack kernel (vendored; upstream

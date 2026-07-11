@@ -3,6 +3,7 @@
 #include "numa_threadpool.h"
 
 #include <chrono>
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -21,6 +22,8 @@ MoEInfer::MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediat
       hidden_size_(hidden_size),
       intermediate_size_(intermediate_size),
       quant_type_(quant_type) {
+
+    routing_counts_.assign((size_t)num_experts_, 0);
 
     tp_size_ = nanovllm::detail::read_env_int64("NANOVLLM_TP_SIZE", 2);
 
@@ -72,6 +75,45 @@ MoEInfer::MoEInfer(int64_t num_experts, int64_t hidden_size, int64_t intermediat
         down_proj_qs_tp_[(size_t)tp] = (int8_t*)numa_alloc_or_throw(down_qs_bytes_per_tp_, node);
         down_proj_d_tp_[(size_t)tp]  = (uint16_t*)numa_alloc_or_throw(down_d_bytes_per_tp_, node);
     }
+}
+
+void MoEInfer::record_routing(const int32_t* routing_ids,
+                              const int32_t* compute_ids,
+                              int64_t num_tokens, int64_t top_k) {
+    int64_t valid = valid_tokens_.load();
+    if (valid <= 0 || valid > num_tokens) valid = num_tokens;
+    std::lock_guard<std::mutex> guard(routing_stats_mutex_);
+    for (int64_t t = 0; t < valid; ++t) {
+        for (int64_t k = 0; k < top_k; ++k) {
+            const int64_t idx = t * top_k + k;
+            const int32_t expert = routing_ids[idx];
+            if (expert >= 0 && expert < num_experts_) {
+                routing_counts_[(size_t)expert] += 1;
+                routing_total_ += 1;
+                if (compute_ids[idx] >= 0) routing_miss_ += 1;
+            }
+        }
+    }
+    routing_calls_ += 1;
+}
+
+torch::Tensor MoEInfer::take_routing_stats() {
+    auto result = torch::zeros({num_experts_ + 3}, torch::TensorOptions().dtype(torch::kInt64));
+    auto* out = result.data_ptr<int64_t>();
+    std::lock_guard<std::mutex> guard(routing_stats_mutex_);
+    std::copy(routing_counts_.begin(), routing_counts_.end(), out);
+    out[num_experts_] = routing_total_;
+    out[num_experts_ + 1] = routing_miss_;
+    out[num_experts_ + 2] = routing_calls_;
+    std::fill(routing_counts_.begin(), routing_counts_.end(), 0);
+    routing_total_ = routing_miss_ = routing_calls_ = 0;
+    return result;
+}
+
+void MoEInfer::reset_routing_stats() {
+    std::lock_guard<std::mutex> guard(routing_stats_mutex_);
+    std::fill(routing_counts_.begin(), routing_counts_.end(), 0);
+    routing_total_ = routing_miss_ = routing_calls_ = 0;
 }
 
 MoEInfer::~MoEInfer() {

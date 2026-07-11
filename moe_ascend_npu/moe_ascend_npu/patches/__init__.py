@@ -34,6 +34,7 @@ def apply_patches():
     # Import lazily so importing this package never pulls in SGLang.
     from moe_ascend_npu.patches import (
         compressed_tensors,
+        cache_graph,
         fused_moe_method,
         minimax_m2,
         moe_layer,
@@ -44,6 +45,7 @@ def apply_patches():
     logger.info("moe_ascend_npu: applying SGLang monkey patches...")
     server_args.apply()
     moe_layer.apply()
+    cache_graph.apply()
     compressed_tensors.apply()
     wna16_moe.apply()
     fused_moe_method.apply()

@@ -344,6 +344,16 @@ private:
     __aicore__ inline void ProcessBlock(int32_t b_idx, int32_t expert_id, int32_t row_idx,
                                         int32_t n_offset, int32_t cur_n_len,
                                         LocalTensor<float>& global_acc) {
+        // A negative id is the cache-miss sentinel.  The row accumulator is
+        // already zero-initialised by Process(), so skipping every K block
+        // makes this route contribute exactly zero without ever indexing the
+        // cache buffers with an invalid address.  The normal (full expert)
+        // operator never emits negative ids, therefore this is backwards
+        // compatible with its existing semantics.
+        if (expert_id < 0 || expert_id >= num_experts) {
+            return;
+        }
+
         uint64_t x_offset;
         if (is_broadcast_x) {
             int32_t batch_idx = row_idx / top_k;

@@ -122,16 +122,15 @@
 - [x] **CPU**: 升级算子至 **Int4** 精度，进一步降低内存占用并对齐 NPU 量化格式。
 
 ### 第二阶段：动态弹性卸载机制 (Elastic Offloading)
-- [ ] **KV Cache 驱动的弹性伸缩**:
-    - 建立显存竞争模型。随着 KV Cache（长文本）占用增加，动态将 NPU 上的专家权重“挤出”到 CPU。
-    - CPU 充当“Shadow Experts”角色，承接被驱逐专家的计算任务。
-- [ ] **SGLang 图执行适配**:
-    - 在 CUDA/NPU Graph 中引入“虚拟专家节点”。
-    - 实现对上层透明的 Dispatcher，在图执行过程中根据标志位动态将 Token 分发至 NPU Stream 或 CPU Callback 线程。
-- [ ] **基于激活频率的热点管理**:
-    - 实时统计专家路由频率。
-    - **Hot Experts** 常驻 NPU HBM。
-    - **Cold Experts** 卸载至 CPU RAM。
+- [x] **固定显存预算的专家粒度缓存**：跨层共享固定 slot，不依赖运行时扩容 KV 池。
+- [x] **SGLang NPU Graph 适配**：图内固定双路径，图外 replay hook 更新 slot table，不修改上游源码。
+- [x] **基于激活频率的热点管理**：排除 graph padding 的滑动窗口 LFU、替换滞回和备用 slot。
+- [x] **精度无损 CPU/NPU 协同**：缓存命中走 NPU W4A16，miss 走 CPU Q4_0，最终贡献相加。
+- [ ] **TP>1 扩展**：rank-0 统一决策并广播 slot delta。
+
+> 当前动态缓存交付边界为 Qwen3 compressed-tensors Int4、TP=1；NPU kernel、CPU 扩展和真实 NPU Graph 端到端路径均已验证。
+
+Qwen3 TP=1 端到端验证已完成：K=1024 的稳态命中率约 68.5%，动态缓存 41.51 tok/s，相同条件全 CPU Q4_0 为 39.98 tok/s；320-token 输出逐字节一致。详见 `docs/bench_results/dynamic_expert_cache_qwen3.md`。
 ---
 
 ## 📂 项目结构

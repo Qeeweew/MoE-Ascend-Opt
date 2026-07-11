@@ -15,6 +15,22 @@ logger = logging.getLogger(__name__)
 
 def _add_moe_offload_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--enable-moe-expert-cache", action="store_true",
+        help="Enable graph-compatible dynamic Int4 expert caching with CPU fallback.",
+    )
+    parser.add_argument("--moe-expert-cache-size", type=int, default=512)
+    parser.add_argument(
+        "--moe-expert-cache-swap-per-update", type=int, default=64,
+        help="Maximum bootstrap fills per update; steady replacement is capped at 8.",
+    )
+    parser.add_argument("--moe-expert-cache-update-interval", type=int, default=32)
+    parser.add_argument("--moe-expert-cache-warmup-steps", type=int, default=16)
+    parser.add_argument("--moe-expert-cache-decay", type=float, default=0.95)
+    parser.add_argument(
+        "--moe-expert-cache-placement", choices=["lfu", "layer"], default="lfu",
+        help="LFU experts globally, or complete-layer placement optimized for batch=1.",
+    )
+    parser.add_argument(
         "--enable-moe-offload",
         action="store_true",
         help="Enable MoE computation offload to CPU using Int8/Int4 quantization. "
@@ -59,6 +75,25 @@ def apply():
         server_args.moe_offload_quant_type = getattr(
             args, "moe_offload_quant_type", "q8_0"
         )
+        server_args.enable_moe_expert_cache = getattr(args, "enable_moe_expert_cache", False)
+        server_args.moe_expert_cache_size = getattr(args, "moe_expert_cache_size", 512)
+        server_args.moe_expert_cache_swap_per_update = getattr(
+            args, "moe_expert_cache_swap_per_update", 64
+        )
+        server_args.moe_expert_cache_update_interval = getattr(
+            args, "moe_expert_cache_update_interval", 32
+        )
+        server_args.moe_expert_cache_warmup_steps = getattr(
+            args, "moe_expert_cache_warmup_steps", 16
+        )
+        server_args.moe_expert_cache_decay = getattr(args, "moe_expert_cache_decay", 0.95)
+        server_args.moe_expert_cache_placement = getattr(
+            args, "moe_expert_cache_placement", "lfu"
+        )
+        if server_args.enable_moe_expert_cache and server_args.enable_moe_offload:
+            raise ValueError(
+                "--enable-moe-expert-cache and --enable-moe-offload are mutually exclusive"
+            )
         return server_args
 
     ServerArgs.from_cli_args = classmethod(_from_cli_args)

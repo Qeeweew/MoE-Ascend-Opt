@@ -53,31 +53,60 @@ def apply():
         except Exception:
             server_args = None
 
-        # Only consider offload when the feature is enabled; otherwise stay on
+        cache_enabled = bool(
+            server_args is not None
+            and getattr(server_args, "enable_moe_expert_cache", False)
+        )
+
+        # Only consider offload/cache when a feature is enabled; otherwise stay on
         # the fast path and never import the nanovllm_ext-dependent module.
         if (
             server_args is None
-            or not getattr(server_args, "enable_moe_offload", False)
+            or not (getattr(server_args, "enable_moe_offload", False) or cache_enabled)
             or layer_id is None
         ):
             return orig_init(self, *args, **kwargs)
 
         # Offload enabled: import the offload impl (hard-requires nanovllm_ext).
         from moe_ascend_npu.patches.offload import (
+            MoEOffloadConfig,
             MoEOffloadFusedMoEMethod,
             MoEOffloadInt4FusedMoEMethod,
+            _is_compressed_tensors_int4,
             create_moe_offload_config,
         )
 
-        offload_cfg = create_moe_offload_config(layer_id, server_args, quant_config)
+        if cache_enabled:
+            from moe_ascend_npu.cache import ExpertCacheConfig
+            from moe_ascend_npu.patches.expert_cache_method import ExpertCacheFusedMoEMethod
+
+            if not _is_compressed_tensors_int4(quant_config):
+                raise ValueError(
+                    "--enable-moe-expert-cache currently requires a symmetric "
+                    "compressed-tensors Int4 MoE model"
+                )
+            cache_cfg = ExpertCacheConfig(
+                size=getattr(server_args, "moe_expert_cache_size", 512),
+                swap_per_update=getattr(server_args, "moe_expert_cache_swap_per_update", 64),
+                update_interval=getattr(server_args, "moe_expert_cache_update_interval", 32),
+                warmup_steps=getattr(server_args, "moe_expert_cache_warmup_steps", 16),
+                decay=getattr(server_args, "moe_expert_cache_decay", 0.95),
+                placement=getattr(server_args, "moe_expert_cache_placement", "lfu"),
+            )
+            cache_cfg.validate()
+            offload_cfg = MoEOffloadConfig(enabled=True, layer_idx=layer_id, quant_type="q4_0")
+            method = ExpertCacheFusedMoEMethod(cache_cfg)
+        else:
+            offload_cfg = create_moe_offload_config(layer_id, server_args, quant_config)
         if offload_cfg is None:
             return orig_init(self, *args, **kwargs)
 
         # Build the offload method and make the official __init__ select it.
-        if offload_cfg.quant_type == "q4_0":
-            method = MoEOffloadInt4FusedMoEMethod()
-        else:
-            method = MoEOffloadFusedMoEMethod()
+        if not cache_enabled:
+            if offload_cfg.quant_type == "q4_0":
+                method = MoEOffloadInt4FusedMoEMethod()
+            else:
+                method = MoEOffloadFusedMoEMethod()
         method.offload_config = offload_cfg
         method.layer_idx = layer_id
 

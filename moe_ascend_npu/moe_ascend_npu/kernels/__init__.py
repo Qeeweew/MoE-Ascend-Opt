@@ -16,6 +16,7 @@ def _load_kernels():
 
         torch.ops.moe_ascend_npu.grouped_gemv_w4a16_moe
         torch.ops.moe_ascend_npu.fused_moe_w4a16_small_bs
+        torch.ops.moe_ascend_npu.fused_moe_w4a16_cached
         torch.ops.moe_ascend_npu.batch_gemm_w4a16_small_bs
     """
     global _so_loaded

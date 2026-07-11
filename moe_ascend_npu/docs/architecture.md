@@ -275,6 +275,14 @@ bash build_kernels.sh [SOC_VERSION]   # 默认 Ascend910_9382
 | `--enable-moe-offload` | flag (store_true) | `False` | 开启 MoE CPU 卸载。需安装 `nanovllm_ext`，否则构造命中层时 `ImportError` |
 | `--moe-offload-start-layer` | int | `0` | 从第几层 MoE 开始卸载（`layer_id >= 此值` 的层卸载，前面的仍在 NPU） |
 | `--moe-offload-quant-type` | choice | `q8_0` | `q8_0`=在线 Int8 量化；`q4_0`=使用预量化 Int4（compressed-tensors 格式）。`q4_0` 若与 awq/gptq 等格式不兼容会自动回退 `q8_0` 并告警 |
+| `--enable-moe-expert-cache` | flag | `False` | 启用跨层动态专家缓存；当前支持 compressed-tensors Int4、TP=1 |
+| `--moe-expert-cache-size` | int | `512` | 全局活动 `(layer, expert)` slot 数；不限制运行时 batch size |
+| `--moe-expert-cache-swap-per-update` | int | `64` | 启动填充每轮最大换入数，同时决定备用 slot 数；满载后自动限制为 8 |
+| `--moe-expert-cache-update-interval` | int | `32` | decode graph replay 更新周期 |
+| `--moe-expert-cache-warmup-steps` | int | `16` | 开始填充缓存前的有效 decode step 数 |
+| `--moe-expert-cache-decay` | float | `0.95` | 路由频率 EMA 衰减系数 |
+
+动态缓存与全层 `--enable-moe-offload` 互斥；动态缓存内部已经包含 Q4_0 CPU 后备路径。缓存模式保持 NPU Graph 开启，由 replay 外部 hook 发布 slot table 变更。
 
 **`create_moe_offload_config` 回退规则**（`offload.py`）：
 - `quant_type=q4_0` 但模型量化格式名含 `awq`/`gptq`/`gptq_marlin`/`awq_marlin` → 回退 `q8_0` + warning

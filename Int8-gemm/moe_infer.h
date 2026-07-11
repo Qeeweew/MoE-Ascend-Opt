@@ -1,6 +1,8 @@
 #pragma once
 #include <torch/extension.h>
 #include <cstdint>
+#include <atomic>
+#include <mutex>
 #include <string>
 #include "numa_threadpool.h"
 #include "quant_traits.h"
@@ -21,6 +23,16 @@ public:
 
     // Get last forward execution time in milliseconds
     double get_last_run_time_ms() const { return last_run_time_ms_; }
+
+    // Routing telemetry used by the graph-outside expert-cache controller.
+    // The compute ids may contain -1 for NPU cache hits; routing ids always
+    // contain the model expert ids.  Only valid_tokens_ rows are counted so
+    // CUDA/NPU graph padding does not bias LFU decisions.
+    void set_valid_tokens(int64_t valid_tokens) { valid_tokens_.store(valid_tokens); }
+    void record_routing(const int32_t* routing_ids, const int32_t* compute_ids,
+                        int64_t num_tokens, int64_t top_k);
+    torch::Tensor take_routing_stats();
+    void reset_routing_stats();
 
     // Get the scale dtype (kFloat16 or kBFloat16)
     at::ScalarType get_scale_dtype() const { return scale_dtype_; }
@@ -98,6 +110,13 @@ private:
 
     // Last forward execution time in milliseconds
     double last_run_time_ms_ = 0.0;
+
+    std::atomic<int64_t> valid_tokens_{0};
+    std::mutex routing_stats_mutex_;
+    std::vector<int64_t> routing_counts_;
+    int64_t routing_total_ = 0;
+    int64_t routing_miss_ = 0;
+    int64_t routing_calls_ = 0;
 
     // Helper to calculate quantized storage bytes
     size_t calculate_qs_bytes(int64_t rows, int64_t cols) const;

@@ -194,6 +194,20 @@ HOST_API at::Tensor fused_moe_w4a16_small_bs(
     return y;
 }
 
+HOST_API at::Tensor fused_moe_w4a16_cached(
+    const at::Tensor &x_in,
+    const at::Tensor &w13_weight, const at::Tensor &w13_scales,
+    const at::Tensor &w2_weight, const at::Tensor &w2_scales,
+    const at::Tensor &slot_ids, const at::Tensor &topk_weights)
+{
+    // The device implementation treats the first weight dimension as an
+    // opaque index space.  For the cache it is the slot count rather than the
+    // model expert count; negative ids are skipped in ProcessBlock().
+    return fused_moe_w4a16_small_bs(
+        x_in, w13_weight, w13_scales, w2_weight, w2_scales,
+        slot_ids, topk_weights);
+}
+
 // -----------------------------------------------------------------------------
 // Small Batch GEMM Host API (Replacement for npu_weight_quant_batchmatmul)
 // -----------------------------------------------------------------------------

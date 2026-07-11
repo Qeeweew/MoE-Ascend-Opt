@@ -57,6 +57,8 @@ def fused_moe_w4a16_ref(
     for b in range(bs):
         for t in range(top_k):
             e = int(expert_ids[b, t].item())
+            if e < 0:
+                continue
             # W13: [2*Inter]
             h13 = w4a16_matvec_ref(raw_w13[e], scale13[e], x[b])
             # SwiGLU
@@ -145,6 +147,35 @@ def _run_one(batch_size):
 
     # Two stacked W4A16 matvecs + SwiGLU in fp16: allow a loose absolute tol.
     assert max_diff < 1.0, f"fused_moe (BS={batch_size}) max_diff {max_diff} too large"
+
+    # Cached variant: permute the physical slot order and mark alternating
+    # routes as misses.  This checks both opaque slot indexing and the -1
+    # zero-contribution contract.
+    perm = torch.randperm(NUM_EXPERTS, device=device)
+    inverse = torch.empty_like(perm)
+    inverse[perm] = torch.arange(NUM_EXPERTS, device=device)
+    slot_ids = inverse[expert_ids.to(torch.int64)].to(torch.int32)
+    slot_ids[:, 1::2] = -1
+    y_cached = torch.ops.moe_ascend_npu.fused_moe_w4a16_cached(
+        x,
+        w13_weight[perm], w13_scale[perm],
+        w2_weight[perm], w2_scale[perm],
+        slot_ids, topk_weights,
+    )
+    y_cached_ref = fused_moe_w4a16_ref(
+        x, raw_w13[perm], w13_scale[perm], raw_w2[perm], w2_scale[perm],
+        slot_ids, topk_weights,
+    )
+    torch.npu.synchronize()
+    cached_diff = (y_cached.float() - y_cached_ref).abs().max().item()
+    assert cached_diff < 1.0, f"cached fused_moe max_diff {cached_diff} too large"
+
+    all_miss = torch.full_like(slot_ids, -1)
+    y_miss = torch.ops.moe_ascend_npu.fused_moe_w4a16_cached(
+        x, w13_weight, w13_scale, w2_weight, w2_scale, all_miss, topk_weights
+    )
+    torch.npu.synchronize()
+    assert float(y_miss.abs().max()) == 0.0
 
 
 def test_fused_moe_w4a16_small_bs():
