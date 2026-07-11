@@ -58,11 +58,10 @@ def test_large_fill_batch_is_capped_after_full():
     assert manager.total_swaps - before <= 8
 
 
-def test_layer_placement_completes_layers_before_scattering():
+def test_global_lfu_competes_across_layers():
     manager = ExpertCacheManager(
         ExpertCacheConfig(
-            size=5, swap_per_update=3, update_interval=1,
-            warmup_steps=0, placement="layer",
+            size=3, swap_per_update=3, update_interval=1, warmup_steps=0,
         )
     )
     manager.freq = {
@@ -70,17 +69,15 @@ def test_layer_placement_completes_layers_before_scattering():
         1: torch.tensor([9.0, 1.0, 1.0], dtype=torch.float64),
     }
     manager.slot_table = torch.full((2, 3), -1, dtype=torch.int32)
-    manager.slot_owner = [None] * 8
+    manager.slot_owner = [None] * 6
     manager._load_owner_into_slot = lambda owner, slot: None
     manager._rebalance()
-    assert set(manager.owner_slot) == {(1, 0), (1, 1), (1, 2)}
-    manager._rebalance()
-    assert len(manager.owner_slot) == 5
+    assert set(manager.owner_slot) == {(1, 0), (0, 2), (0, 1)}
 
 
 if __name__ == "__main__":
     test_fill_then_replace_with_hysteresis()
     test_config_validation()
     test_large_fill_batch_is_capped_after_full()
-    test_layer_placement_completes_layers_before_scattering()
+    test_global_lfu_competes_across_layers()
     print("Expert cache policy tests passed.")

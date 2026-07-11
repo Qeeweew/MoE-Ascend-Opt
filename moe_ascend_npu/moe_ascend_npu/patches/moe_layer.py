@@ -91,7 +91,6 @@ def apply():
                 update_interval=getattr(server_args, "moe_expert_cache_update_interval", 32),
                 warmup_steps=getattr(server_args, "moe_expert_cache_warmup_steps", 16),
                 decay=getattr(server_args, "moe_expert_cache_decay", 0.95),
-                placement=getattr(server_args, "moe_expert_cache_placement", "lfu"),
             )
             cache_cfg.validate()
             offload_cfg = MoEOffloadConfig(enabled=True, layer_idx=layer_id, quant_type="q4_0")

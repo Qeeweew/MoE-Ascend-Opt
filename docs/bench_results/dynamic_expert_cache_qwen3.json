@@ -3,15 +3,54 @@
   "model": "/mnt/models/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32",
   "tp_size": 1,
   "npu_graph_bs": [1, 2, 4, 8],
-  "request": {"output_tokens": 320, "temperature": 0, "seed": 1234},
+  "request": {
+    "output_tokens": 320,
+    "temperature": 0,
+    "prompt_chars": 1079
+  },
   "slot_mib": 2.53125,
-  "results": [
-    {"mode": "cpu_q4_0", "latency_s": 8.003315079957247, "throughput_tps": 39.983432947},
-    {"mode": "cache", "k": 512, "steady_interval": 32, "hit_rate_range": [0.45, 0.50], "latency_s": 9.687302179634571, "throughput_tps": 33.032921253},
-    {"mode": "cache", "k": 1024, "steady_interval": 32, "hit_rate_range": [0.60, 0.68], "latency_s": 11.153005609288812, "throughput_tps": 28.691816342},
-    {"mode": "cache", "placement": "lfu", "k": 1024, "steady_interval": 256, "hit_rate": 0.6854, "latency_s": 7.708767630159855, "throughput_tps": 41.511161428, "speedup_vs_cpu": 1.038208944},
-    {"mode": "cache", "placement": "layer", "k": 2048, "complete_layers": 16, "latency_s_range": [7.485721580684185, 7.541703790426254], "throughput_tps_range": [42.43072586607001, 42.7480457214453], "speedup_vs_cpu_range": [1.061208, 1.069142]},
-    {"mode": "cache", "placement": "layer", "k": 4096, "complete_layers": 32, "mem_fraction_static": 0.60, "latency_s_samples": [6.105483969673514, 6.283338898792863, 6.239259051159024], "throughput_tps_samples": [52.411897498948264, 50.92833685311443, 51.28814132834504], "speedup_vs_cpu_range": [1.25213, 1.31084]}
+  "policy": "global_lfu_expert_pool",
+  "small_cache_results": [
+    {
+      "mode": "cpu_q4_0",
+      "latency_s_samples": [8.697935, 8.296621, 8.233143, 8.306516, 8.355301, 8.410965, 8.212025, 8.218783],
+      "latency_s_median_steady": 8.296621,
+      "throughput_tps_median_steady": 38.57,
+      "local_decode_tps_median": 40.445
+    },
+    {
+      "mode": "cache",
+      "k": 128,
+      "active_cache_gib": 0.31640625,
+      "physical_cache_gib": 0.3359375,
+      "expert_instance_fraction": 0.0208333333,
+      "hit_rate_median": 0.2328,
+      "latency_s_samples": [10.625318, 8.246122, 8.358204, 8.218706, 8.340452, 8.255206, 8.362362, 8.216881],
+      "latency_s_median_steady": 8.255206,
+      "throughput_tps_median_steady": 38.763,
+      "local_decode_tps_median": 41.29,
+      "speedup_vs_cpu_e2e": 1.0050,
+      "speedup_vs_cpu_local_decode": 1.0209
+    }
   ],
-  "exact_text_match_cpu_vs_cache_320_tokens": true
+  "cpu_remainder_microbenchmark": {
+    "hidden": 2048,
+    "intermediate_shard": 768,
+    "top_k": 8,
+    "cpu_routes_8_ms": 0.290,
+    "cpu_routes_7_ms": 0.253,
+    "drop_8_to_7": 0.1254,
+    "ideal_one_route_drop": 0.125
+  },
+  "legacy_upper_bound_not_mainline": [
+    {
+      "mode": "cache",
+      "k": 1024,
+      "hit_rate": 0.6854,
+      "latency_s": 7.708767630159855,
+      "throughput_tps": 41.511161428,
+      "speedup_vs_cpu": 1.038208944
+    }
+  ],
+  "exact_text_hash_match_cpu_vs_k128": true
 }

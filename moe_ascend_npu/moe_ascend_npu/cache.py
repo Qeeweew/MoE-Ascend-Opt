@@ -27,7 +27,6 @@ class ExpertCacheConfig:
     update_interval: int = 32
     warmup_steps: int = 16
     decay: float = 0.95
-    placement: str = "lfu"
 
     def validate(self) -> None:
         if self.size < 0:
@@ -38,8 +37,6 @@ class ExpertCacheConfig:
             raise ValueError("cache update interval must be > 0 and warmup must be >= 0")
         if not 0.0 <= self.decay < 1.0:
             raise ValueError("cache decay must be in [0, 1)")
-        if self.placement not in ("lfu", "layer"):
-            raise ValueError("cache placement must be 'lfu' or 'layer'")
 
 
 @dataclass
@@ -213,16 +210,13 @@ class ExpertCacheManager:
             if self.cooldown[owner] <= 0:
                 del self.cooldown[owner]
 
-        if self.config.placement == "layer":
-            candidates = self._layer_complete_candidates()
-        else:
-            candidates = sorted(
-                ((float(scores[e]), (layer, e))
-                 for layer, scores in self.freq.items()
-                 for e in range(scores.numel())
-                 if (layer, e) not in self.owner_slot and scores[e] > 0),
-                reverse=True,
-            )
+        candidates = sorted(
+            ((float(scores[e]), (layer, e))
+             for layer, scores in self.freq.items()
+             for e in range(scores.numel())
+             if (layer, e) not in self.owner_slot and scores[e] > 0),
+            reverse=True,
+        )
         swaps = 0
         # A large configured batch is useful for bootstrapping an empty cache,
         # but allowing the same volume after it is full causes route-window
@@ -261,51 +255,6 @@ class ExpertCacheManager:
             self.slot_table[owner[0], owner[1]].fill_(slot)
             swaps += 1
             self.total_swaps += 1
-
-    def _layer_complete_candidates(self):
-        """Prefer complete layers so a hit removes the entire CPU callback.
-
-        At batch=1 a scattered LFU placement leaves at least one miss in almost
-        every layer.  The expert GEMMs get smaller, but D2H/H2D, callback,
-        routing and thread-pool costs still execute for every MoE layer.  This
-        placement ranks layers by observed traffic and fills every expert of a
-        selected layer before moving to the next one.  Any remainder smaller
-        than one layer falls back to ordinary expert LFU.
-        """
-        if not self.freq:
-            return []
-        num_experts = int(next(iter(self.freq.values())).numel())
-        complete_layers = self.config.size // num_experts
-        layer_rank = sorted(
-            self.freq,
-            key=lambda layer: (float(self.freq[layer].sum()), -layer),
-            reverse=True,
-        )
-        selected = layer_rank[:complete_layers]
-        result = []
-        # A common layer score keeps a selected layer contiguous in the sorted
-        # candidate stream; the expert frequency is only a deterministic tie
-        # breaker within that layer.
-        for rank, layer in enumerate(selected):
-            layer_priority = float(len(layer_rank) - rank) * 1.0e12
-            for expert in range(num_experts):
-                owner = (layer, expert)
-                if owner not in self.owner_slot:
-                    result.append((layer_priority + float(self.freq[layer][expert]), owner))
-
-        remainder = self.config.size - complete_layers * num_experts
-        if remainder:
-            selected_set = set(selected)
-            tail = sorted(
-                ((float(scores[e]), (layer, e))
-                 for layer, scores in self.freq.items()
-                 if layer not in selected_set
-                 for e in range(scores.numel())
-                 if (layer, e) not in self.owner_slot and scores[e] > 0),
-                reverse=True,
-            )
-            result.extend(tail[:remainder])
-        return result
 
     def _find_spare_slot(self) -> int:
         for slot, owner in enumerate(self.slot_owner):

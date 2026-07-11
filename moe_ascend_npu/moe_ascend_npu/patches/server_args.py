@@ -27,10 +27,6 @@ def _add_moe_offload_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--moe-expert-cache-warmup-steps", type=int, default=16)
     parser.add_argument("--moe-expert-cache-decay", type=float, default=0.95)
     parser.add_argument(
-        "--moe-expert-cache-placement", choices=["lfu", "layer"], default="lfu",
-        help="LFU experts globally, or complete-layer placement optimized for batch=1.",
-    )
-    parser.add_argument(
         "--enable-moe-offload",
         action="store_true",
         help="Enable MoE computation offload to CPU using Int8/Int4 quantization. "
@@ -87,9 +83,6 @@ def apply():
             args, "moe_expert_cache_warmup_steps", 16
         )
         server_args.moe_expert_cache_decay = getattr(args, "moe_expert_cache_decay", 0.95)
-        server_args.moe_expert_cache_placement = getattr(
-            args, "moe_expert_cache_placement", "lfu"
-        )
         if server_args.enable_moe_expert_cache and server_args.enable_moe_offload:
             raise ValueError(
                 "--enable-moe-expert-cache and --enable-moe-offload are mutually exclusive"
