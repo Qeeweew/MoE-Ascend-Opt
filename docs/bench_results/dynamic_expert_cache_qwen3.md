@@ -79,6 +79,15 @@ K=256 时 hit rate 提升到约 38.3%，更新周期同样退到 256/512 step，
 
 ## 复现
 
+完整固定 prompt sweep（CPU baseline + K=64/128/256/512）：
+
+```bash
+python moe_ascend_npu/tests/benchmark_expert_cache_prompt.py \
+  --result-dir docs/bench_results/raw/qwen3_fixed_prompt_sweep
+```
+
+该脚本会逐个启动服务，保持 NPU Graph BS=1/2/4/8，发 8 次固定 prompt 请求，并从 server log 解析 `window_hit`、退避步长、local decode throughput。每个配置输出独立 JSON，汇总结果写入 `summary.json`。
+
 K=256 默认小缓存：
 
 ```bash
