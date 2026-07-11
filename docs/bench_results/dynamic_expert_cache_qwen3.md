@@ -92,6 +92,16 @@ python moe_ascend_npu/tests/benchmark_expert_cache_prompt.py \
 
 该脚本会逐个启动服务，保持 NPU Graph BS=1/2/4/8，发 8 次固定 prompt 请求，并从 server log 解析 `window_hit`、退避步长、local decode throughput。每个配置输出独立 JSON，汇总结果写入 `summary.json`，其中直接包含相对 CPU speedup、expert instance fraction、physical cache GiB 和跨配置输出 hash 一致性。
 
+脚本自身已做最小端到端烟测：
+
+```bash
+python moe_ascend_npu/tests/benchmark_expert_cache_prompt.py \
+  --skip-cpu --cache-sizes 256 --requests 2 --output-tokens 32 \
+  --result-dir /tmp/moe_cache_prompt_smoke
+```
+
+该烟测确认脚本可以自动启动 K=256 cache 服务、完成请求、解析 allocation / hit window / local decode throughput、生成 `cache_k256.json` 与 `summary.json`，并正常停止服务。
+
 K=256 默认小缓存：
 
 ```bash
