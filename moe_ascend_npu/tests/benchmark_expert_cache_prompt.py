@@ -224,6 +224,60 @@ def summarize(
     return summary
 
 
+def enrich_results(
+    results: list[dict[str, Any]],
+    *,
+    output_tokens: int,
+    slot_mib: float,
+    num_moe_layers: int,
+    num_experts: int,
+) -> dict[str, Any]:
+    """Add cross-run metrics used by the thesis tables."""
+
+    cpu = next((row for row in results if row["mode"] == "cpu_q4_0"), None)
+    cpu_latency = (
+        float(cpu["latency_s_median_drop_first"])
+        if cpu and cpu.get("latency_s_median_drop_first")
+        else None
+    )
+    cpu_local = None
+    if cpu:
+        cpu_local = cpu.get("log", {}).get("local_decode_tps_median_tail16")
+
+    total_instances = num_moe_layers * num_experts
+    all_hash_sets = [
+        tuple(row.get("output_hashes", []))
+        for row in results
+        if row.get("output_hashes")
+    ]
+    exact_hash_match = bool(all_hash_sets) and len(set(all_hash_sets)) == 1
+
+    for row in results:
+        latency = row.get("latency_s_median_drop_first")
+        if latency:
+            row["throughput_tps_median_drop_first"] = round(output_tokens / float(latency), 3)
+        if cpu_latency and latency and row["mode"] != "cpu_q4_0":
+            row["speedup_vs_cpu_e2e"] = round(cpu_latency / float(latency), 4)
+
+        local_tps = row.get("log", {}).get("local_decode_tps_median_tail16")
+        if cpu_local and local_tps and row["mode"] != "cpu_q4_0":
+            row["speedup_vs_cpu_local_decode"] = round(float(local_tps) / float(cpu_local), 4)
+
+        cache_size = row.get("k")
+        if cache_size:
+            row["expert_instance_fraction"] = round(float(cache_size) / total_instances, 10)
+            allocation = row.get("log", {}).get("allocation") or {}
+            physical_slots = int(allocation.get("active", cache_size)) + int(allocation.get("spare", 0))
+            row["physical_cache_gib"] = round(physical_slots * slot_mib / 1024.0, 10)
+
+    return {
+        "exact_text_hash_match_across_modes": exact_hash_match,
+        "reference_output_hashes": list(all_hash_sets[0]) if all_hash_sets else [],
+        "cpu_latency_s_median_drop_first": cpu_latency,
+        "cpu_local_decode_tps_median_tail16": cpu_local,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-path", default="/mnt/models/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32")
@@ -238,6 +292,9 @@ def main() -> int:
     parser.add_argument("--requests", type=int, default=8)
     parser.add_argument("--output-tokens", type=int, default=320)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument("--num-moe-layers", type=int, default=48)
+    parser.add_argument("--num-experts", type=int, default=128)
+    parser.add_argument("--slot-mib", type=float, default=2.53125)
     parser.add_argument("--swap-per-update", type=int, default=8)
     parser.add_argument("--update-interval", type=int, default=16)
     parser.add_argument("--warmup-steps", type=int, default=16)
@@ -274,12 +331,23 @@ def main() -> int:
         finally:
             stop_server(proc)
 
+    derived = enrich_results(
+        all_results,
+        output_tokens=args.output_tokens,
+        slot_mib=args.slot_mib,
+        num_moe_layers=args.num_moe_layers,
+        num_experts=args.num_experts,
+    )
     output = {
         "model": args.model_path,
         "policy": "global_lfu_expert_pool",
         "requests": args.requests,
         "output_tokens": args.output_tokens,
         "prompt_chars": len(args.prompt.strip()),
+        "num_moe_layers": args.num_moe_layers,
+        "num_experts": args.num_experts,
+        "slot_mib": args.slot_mib,
+        "derived": derived,
         "results": all_results,
     }
     (result_dir / "summary.json").write_text(

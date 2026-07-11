@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from benchmark_expert_cache_prompt import parse_server_log, summarize
+from benchmark_expert_cache_prompt import enrich_results, parse_server_log, summarize
 
 
 def test_parse_server_log_extracts_cache_metrics(tmp_path: Path):
@@ -86,3 +86,76 @@ def test_summarize_marks_hash_drift():
 
     assert summary["output_hashes"] == ["abc", "def"]
     assert summary["output_hash_stable"] is False
+
+
+def test_enrich_results_adds_speedups_and_cache_footprint():
+    results = [
+        {
+            "mode": "cpu_q4_0",
+            "k": None,
+            "latency_s_median_drop_first": 8.0,
+            "throughput_tps_median_drop_first": 40.0,
+            "output_hashes": ["same"],
+            "log": {"local_decode_tps_median_tail16": 40.0},
+        },
+        {
+            "mode": "cache",
+            "k": 256,
+            "latency_s_median_drop_first": 7.5,
+            "throughput_tps_median_drop_first": 42.0,
+            "output_hashes": ["same"],
+            "log": {
+                "local_decode_tps_median_tail16": 44.0,
+                "allocation": {"active": 256, "spare": 8},
+            },
+        },
+    ]
+
+    derived = enrich_results(
+        results,
+        output_tokens=320,
+        slot_mib=2.53125,
+        num_moe_layers=48,
+        num_experts=128,
+    )
+
+    assert derived["exact_text_hash_match_across_modes"] is True
+    assert derived["reference_output_hashes"] == ["same"]
+    assert derived["cpu_latency_s_median_drop_first"] == 8.0
+    assert derived["cpu_local_decode_tps_median_tail16"] == 40.0
+
+    cache = results[1]
+    assert cache["throughput_tps_median_drop_first"] == 42.667
+    assert cache["speedup_vs_cpu_e2e"] == 1.0667
+    assert cache["speedup_vs_cpu_local_decode"] == 1.1
+    assert cache["expert_instance_fraction"] == 0.0416666667
+    assert cache["physical_cache_gib"] == pytest.approx(0.6525878906)
+
+
+def test_enrich_results_detects_cross_mode_hash_mismatch():
+    results = [
+        {
+            "mode": "cpu_q4_0",
+            "k": None,
+            "latency_s_median_drop_first": 8.0,
+            "output_hashes": ["cpu"],
+            "log": {},
+        },
+        {
+            "mode": "cache",
+            "k": 256,
+            "latency_s_median_drop_first": 8.0,
+            "output_hashes": ["cache"],
+            "log": {},
+        },
+    ]
+
+    derived = enrich_results(
+        results,
+        output_tokens=320,
+        slot_mib=2.53125,
+        num_moe_layers=48,
+        num_experts=128,
+    )
+
+    assert derived["exact_text_hash_match_across_modes"] is False
