@@ -70,6 +70,10 @@ K=256 时 hit rate 提升到约 38.3%，更新周期同样退到 256/512 step，
 
 这不是整层缓存失败，而是小缓存热点分流的真实边界：当 K 只有 2.08% expert instances 时，收益首先应体现在 CPU remainder 和局部 decode；端到端稳定提升还需要更高的小 K 命中率或更低控制面开销。
 
+## 默认路径验证
+
+只传 `--enable-moe-expert-cache`、不显式传 `--moe-expert-cache-size` 和 `--moe-expert-cache-update-interval` 的启动路径已经单独验证。日志显示默认分配 `active=256, spare=8`，总 cache buffer 约 0.65 GiB；短请求期间 `ExpertCache` 更新 step 为 `32, 48, 64, 80, 96`，相邻差值均为 16，说明默认 `update_interval=16` 已生效。Graph capture 正常完成。
+
 ## 可用于论文的结论
 
 1. 小缓存全局 expert pool 可以在只缓存 2.08% expert instances 时获得约 23.3% routing hit rate，说明 Qwen3 decode routing 存在可利用热点；1.04% 的 K=64 命中率只有约 13.2%，不足以端到端超过 CPU baseline。
