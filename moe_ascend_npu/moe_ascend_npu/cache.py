@@ -20,10 +20,10 @@ except ImportError:  # CPU-only policy tests do not require SGLang.
 
 @dataclass(frozen=True)
 class ExpertCacheConfig:
-    # Cache a small hot working set across all layers.  K=128 is the smallest
-    # verified default for Qwen3-30B-A3B: K=64 is too sparse to beat CPU-only
-    # offload on the measured decode workload.
-    size: int = 128
+    # Cache a small hot working set across all layers.  K=256 is the measured
+    # default for Qwen3-30B-A3B: it keeps only 4.17% of expert instances while
+    # producing a stable end-to-end gain on the decode workload.
+    size: int = 256
     swap_per_update: int = 8
     update_interval: int = 32
     warmup_steps: int = 16

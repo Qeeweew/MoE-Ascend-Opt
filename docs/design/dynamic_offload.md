@@ -23,7 +23,7 @@
 
 首版交付边界是 Qwen3 compressed-tensors 对称 Int4、TP=1。多 rank 的统一决策与 delta broadcast 留作后续扩展。
 
-真实 Qwen3 实验已经完成：K=1024 大缓存可作为上界实验，稳态命中率约 68.5%，320-token 输出与全 CPU Q4_0 逐字节一致；满载后 256-step 低频更新取得 41.51 tok/s，相对全 CPU 的 39.98 tok/s 提升约 3.8%。当前论文实现目标改为小 K 全局 expert pool；K=128 只缓存约 2.08% 的专家实例并取得可复现端到端正收益，K=256 缓存约 4.17% 时端到端提升约 7.1%，K=512 缓存约 8.33% 时提升约 15.0% 但仍在替换收敛期；K=64 仅约 1.04% 且命中率不足，作为低内存消融而非默认配置。端到端收益取决于命中率和 CPU remainder 是否随 miss expert 数下降。完整记录见 `docs/bench_results/dynamic_expert_cache_qwen3.md`。
+真实 Qwen3 实验已经完成：K=1024 大缓存可作为上界实验，稳态命中率约 68.5%，320-token 输出与全 CPU Q4_0 逐字节一致；满载后 256-step 低频更新取得 41.51 tok/s，相对全 CPU 的 39.98 tok/s 提升约 3.8%。当前论文实现目标改为小 K 全局 expert pool；K=256 缓存约 4.17% expert instances 时端到端提升约 7.1%，且已进入稳定更新退避，因此作为默认小缓存配置；K=128 只缓存约 2.08% 的专家实例并取得可复现端到端正收益，作为最小正收益消融；K=512 缓存约 8.33% 时提升约 15.0% 但仍在替换收敛期；K=64 仅约 1.04% 且命中率不足，作为低内存消融而非默认配置。端到端收益取决于命中率和 CPU remainder 是否随 miss expert 数下降。完整记录见 `docs/bench_results/dynamic_expert_cache_qwen3.md`。
 
 ---
 
