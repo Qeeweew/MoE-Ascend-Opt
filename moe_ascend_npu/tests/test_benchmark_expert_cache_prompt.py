@@ -159,3 +159,27 @@ def test_enrich_results_detects_cross_mode_hash_mismatch():
     )
 
     assert derived["exact_text_hash_match_across_modes"] is False
+
+
+def test_enrich_results_marks_cross_mode_hash_unknown_for_single_result():
+    results = [
+        {
+            "mode": "cache",
+            "k": 256,
+            "latency_s_median_drop_first": 1.5,
+            "output_hashes": ["single"],
+            "log": {"allocation": {"active": 256, "spare": 8}},
+        },
+    ]
+
+    derived = enrich_results(
+        results,
+        output_tokens=32,
+        slot_mib=2.53125,
+        num_moe_layers=48,
+        num_experts=128,
+    )
+
+    assert derived["exact_text_hash_match_across_modes"] is None
+    assert derived["reference_output_hashes"] == ["single"]
+    assert results[0]["throughput_tps_median_drop_first"] == 21.333

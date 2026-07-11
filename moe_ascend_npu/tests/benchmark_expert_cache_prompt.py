@@ -250,7 +250,10 @@ def enrich_results(
         for row in results
         if row.get("output_hashes")
     ]
-    exact_hash_match = bool(all_hash_sets) and len(set(all_hash_sets)) == 1
+    if len(all_hash_sets) >= 2:
+        exact_hash_match = len(set(all_hash_sets)) == 1
+    else:
+        exact_hash_match = None
 
     for row in results:
         latency = row.get("latency_s_median_drop_first")

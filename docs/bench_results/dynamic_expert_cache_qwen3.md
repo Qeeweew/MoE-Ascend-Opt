@@ -100,7 +100,7 @@ python moe_ascend_npu/tests/benchmark_expert_cache_prompt.py \
   --result-dir /tmp/moe_cache_prompt_smoke
 ```
 
-该烟测确认脚本可以自动启动 K=256 cache 服务、完成请求、解析 allocation / hit window / local decode throughput、生成 `cache_k256.json` 与 `summary.json`，并正常停止服务。
+该烟测确认脚本可以自动启动 K=256 cache 服务、完成请求、解析 allocation / hit window / local decode throughput、验证单配置输出 hash 稳定、生成 `cache_k256.json` 与 `summary.json`，并正常停止服务。跨配置 hash 一致性只在实际 sweep 至少包含两个配置时给出。
 
 K=256 默认小缓存：
 
