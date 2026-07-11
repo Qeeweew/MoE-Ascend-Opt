@@ -75,9 +75,33 @@ def test_global_lfu_competes_across_layers():
     assert set(manager.owner_slot) == {(1, 0), (0, 2), (0, 1)}
 
 
+def test_steady_interval_backoff_and_reset():
+    manager = ExpertCacheManager(
+        ExpertCacheConfig(size=2, swap_per_update=1, update_interval=16, warmup_steps=0)
+    )
+    manager.owner_slot = {(0, 0): 0, (0, 1): 1}
+
+    assert manager._steady_interval_multiplier == 8
+    manager._update_interval_backoff(hit_rate=0.25, swaps=0)
+    assert manager._steady_interval_multiplier == 8
+    manager._update_interval_backoff(hit_rate=0.26, swaps=0)
+    assert manager._steady_interval_multiplier == 16
+
+    manager._update_interval_backoff(hit_rate=0.27, swaps=1)
+    assert manager._steady_interval_multiplier == 8
+
+    manager._update_interval_backoff(hit_rate=0.30, swaps=0)
+    manager._update_interval_backoff(hit_rate=0.31, swaps=0)
+    assert manager._steady_interval_multiplier == 16
+
+    manager._update_interval_backoff(hit_rate=0.20, swaps=0)
+    assert manager._steady_interval_multiplier == 8
+
+
 if __name__ == "__main__":
     test_fill_then_replace_with_hysteresis()
     test_config_validation()
     test_large_fill_batch_is_capped_after_full()
     test_global_lfu_competes_across_layers()
+    test_steady_interval_backoff_and_reset()
     print("Expert cache policy tests passed.")

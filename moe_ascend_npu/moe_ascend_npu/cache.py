@@ -51,6 +51,11 @@ class _LayerSource:
 class ExpertCacheManager:
     """Own fixed cache tensors, routing EMA, and graph-boundary replacement."""
 
+    _BASE_STEADY_INTERVAL_MULTIPLIER = 8
+    _MAX_STEADY_INTERVAL_MULTIPLIER = 32
+    _STABLE_WINDOWS_TO_GROW = 2
+    _HIT_RATE_DROP_RESET = 0.05
+
     def __init__(self, config: ExpertCacheConfig):
         config.validate()
         self.config = config
@@ -69,6 +74,9 @@ class ExpertCacheManager:
         self.total_routes = 0
         self.total_misses = 0
         self.total_swaps = 0
+        self._steady_interval_multiplier = self._BASE_STEADY_INTERVAL_MULTIPLIER
+        self._stable_no_swap_windows = 0
+        self._last_window_hit_rate = 0.0
         self._lock = threading.RLock()
 
     @property
@@ -173,7 +181,7 @@ class ExpertCacheManager:
             # a stream synchronization every few decode tokens.
             interval = self.config.update_interval
             if len(self.owner_slot) >= self.config.size:
-                interval *= 8
+                interval *= self._steady_interval_multiplier
             if (self.replay_steps - self.config.warmup_steps) % interval:
                 return
 
@@ -185,10 +193,11 @@ class ExpertCacheManager:
             # is intended to save.  Cache copies/table publication below are
             # enqueued on the main stream before the next replay and therefore
             # remain stream ordered.
-            self._collect_stats()
-            self._rebalance()
+            hit_rate = self._collect_stats()
+            swaps = self._rebalance()
+            self._update_interval_backoff(hit_rate, swaps)
 
-    def _collect_stats(self) -> None:
+    def _collect_stats(self) -> float:
         window_total = window_miss = 0
         for layer_idx, source in self.sources.items():
             stats = source.handle.take_routing_stats()
@@ -204,7 +213,9 @@ class ExpertCacheManager:
             "[ExpertCache] step=%d active=%d window_hit=%.2f%% swaps=%d",
             self.replay_steps, len(self.owner_slot), hit_rate * 100, self.total_swaps,
         )
-    def _rebalance(self) -> None:
+        return hit_rate
+
+    def _rebalance(self) -> int:
         for owner in list(self.cooldown):
             self.cooldown[owner] -= 1
             if self.cooldown[owner] <= 0:
@@ -255,6 +266,39 @@ class ExpertCacheManager:
             self.slot_table[owner[0], owner[1]].fill_(slot)
             swaps += 1
             self.total_swaps += 1
+        return swaps
+
+    def _update_interval_backoff(self, hit_rate: float, swaps: int) -> None:
+        if len(self.owner_slot) < self.config.size:
+            self._steady_interval_multiplier = self._BASE_STEADY_INTERVAL_MULTIPLIER
+            self._stable_no_swap_windows = 0
+            self._last_window_hit_rate = hit_rate
+            return
+
+        hit_rate_dropped = (
+            hit_rate + self._HIT_RATE_DROP_RESET < self._last_window_hit_rate
+        )
+        if swaps > 0 or hit_rate_dropped:
+            self._steady_interval_multiplier = self._BASE_STEADY_INTERVAL_MULTIPLIER
+            self._stable_no_swap_windows = 0
+            self._last_window_hit_rate = hit_rate
+            return
+
+        self._stable_no_swap_windows += 1
+        if (
+            self._stable_no_swap_windows >= self._STABLE_WINDOWS_TO_GROW
+            and self._steady_interval_multiplier < self._MAX_STEADY_INTERVAL_MULTIPLIER
+        ):
+            self._steady_interval_multiplier = min(
+                self._steady_interval_multiplier * 2,
+                self._MAX_STEADY_INTERVAL_MULTIPLIER,
+            )
+            self._stable_no_swap_windows = 0
+            logger.info(
+                "[ExpertCache] steady update interval backed off to %d steps",
+                self.config.update_interval * self._steady_interval_multiplier,
+            )
+        self._last_window_hit_rate = hit_rate
 
     def _find_spare_slot(self) -> int:
         for slot, owner in enumerate(self.slot_owner):
