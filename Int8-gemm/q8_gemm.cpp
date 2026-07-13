@@ -2,6 +2,7 @@
 #include "utils.h"
 #include "vec_simd.h"
 #include "moe_common.h"
+#include "moe_decode_gemv.h"
 
 #include <ATen/Parallel.h>
 #include <omp.h>
@@ -351,6 +352,18 @@ void moe_forward_ptr_impl(
             global_tasks.push_back({exp_id, std::min(M_BLOCK, count - offset), start_pos + offset});
         }
     }
+
+    std::vector<moe::decode::Route> decode_routes;
+    const bool decode_routes_eligible =
+        num_tokens == 1 &&
+        std::all_of(global_tasks.begin(), global_tasks.end(),
+                    [](const MoeTask& task) { return task.num_tokens == 1; });
+    if (decode_routes_eligible) {
+        decode_routes.reserve(global_tasks.size());
+        for (const MoeTask& task : global_tasks) {
+            decode_routes.push_back({task.expert_id, task.global_token_start_pos});
+        }
+    }
     PROFILE_STAGE_END(stage_pre);
 
     // 4. Launch Distributed Execution (Pipeline A -> B -> C1)
@@ -385,7 +398,35 @@ void moe_forward_ptr_impl(
             // --- Stage B: Expert Compute ---
             const int pool_num_threads = exec->pool->num_threads();
 
-            if (!global_tasks.empty() && global_tasks.size() <= (size_t)pool_num_threads) {
+            bool decode_engine_used = false;
+            if constexpr (QT == quant::QuantType::Q4_0) {
+                if (decode_routes_eligible && !decode_routes.empty()) {
+                    moe::decode::Q4Args decode_args{
+                        tp,
+                        (int)hidden_dim,
+                        (int)intermediate_shard,
+                        decode_routes.data(),
+                        (int)decode_routes.size(),
+                        local_x_qs,
+                        local_x_d,
+                        reinterpret_cast<const uint32_t*>(gate_up_qs_tp[tp]),
+                        gate_up_d_tp[tp],
+                        reinterpret_cast<const uint32_t*>(down_proj_qs_tp[tp]),
+                        down_proj_d_tp[tp],
+                        std::is_same_v<B_SCALE_TYPE, at::Half>
+                            ? moe::decode::ScaleType::Fp16
+                            : moe::decode::ScaleType::Bf16,
+                        pool_expert_out[tp],
+                        exec->pool.get(),
+                    };
+                    moe::decode::run_q4(decode_args);
+                    decode_engine_used = true;
+                }
+            }
+
+            if (decode_engine_used) {
+                // Dedicated batch-1 GEMV engine completed all active routes.
+            } else if (!global_tasks.empty() && global_tasks.size() <= (size_t)pool_num_threads) {
                 // Decode/small-batch path.  Expert caching deliberately reduces
                 // the number of CPU expert tasks.  Keeping the old fixed two
                 // threads per task made that win self-defeating: one remaining

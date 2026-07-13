@@ -1,0 +1,14 @@
+/home/xwj/workspace/MoE-Ascend-Opt/moe_ascend_npu/tests/benchmark_fused_moe.py:309: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
+  w13_offset = torch.zeros_like(w13_scale)
+[W713 05:11:16.361888820 MoeInitRoutingKernelNpuOpApi.cpp:28] Warning: The oprator of MoeInitRouting will be removed from Pytorch and switch to AscendSpeed after 630. (function operator())
+BS | Ref(us) | Custom(us) | Ref GB/s | Custom GB/s | Speedup
+--------------------------------------------------------------------
+ 1 |  201.93 |      42.85 |   105.16 |     495.48 |    4.71x
+ 2 |  269.49 |      60.39 |   157.58 |     703.22 |    4.46x
+ 3 |  410.52 |      77.86 |   155.17 |     818.18 |    5.27x
+ 4 |  519.74 |      94.86 |   163.42 |     895.38 |    5.48x
+ 5 |  617.02 |     111.99 |   172.07 |     948.04 |    5.51x
+ 6 |  726.15 |     137.43 |   175.45 |     927.04 |    5.28x
+ 7 |  840.33 |     155.34 |   176.88 |     956.81 |    5.41x
+ 8 |  937.52 |     173.80 |   181.19 |     977.37 |    5.39x
+JSON result: docs/bench_results/raw/operators_qwen3/npu_fused_moe_w4a16.json

@@ -1,0 +1,538 @@
+/sgl-workspace/sglang/python/sglang/launch_server.py:54: UserWarning: 'python -m sglang.launch_server' is still supported, but 'sglang serve' is the recommended entrypoint.
+  Example: sglang serve --model-path <model> [options]
+  warnings.warn(
+[2026-07-13 08:28:12] get env HOSTNAME = a13-10u-a800t-a2-gpuserver-04
+[2026-07-13 08:28:13] server_args=ServerArgs(model_path='/mnt/models/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32', tokenizer_path='/mnt/models/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32', tokenizer_mode='auto', tokenizer_backend='huggingface', tokenizer_worker_num=1, detokenizer_worker_num=1, skip_tokenizer_init=False, load_format='auto', model_loader_extra_config='{}', trust_remote_code=True, context_length=None, is_embedding=False, prefill_only_disable_kv_cache=False, enable_multimodal=None, revision=None, model_impl='auto', model_config_parser='auto', host='127.0.0.1', port=31000, fastapi_root_path='', grpc_mode=False, skip_server_warmup=False, warmups=None, nccl_port=None, checkpoint_engine_wait_weights_before_ready=False, ssl_keyfile=None, ssl_certfile=None, ssl_ca_certs=None, ssl_keyfile_password=None, enable_ssl_refresh=False, enable_http2=False, dtype='auto', quantization=None, quantization_param_path=None, kv_cache_dtype='auto', enable_fp32_lm_head=False, modelopt_quant=None, modelopt_checkpoint_restore_path=None, modelopt_checkpoint_save_path=None, modelopt_export_path=None, quantize_and_serve=False, rl_quant_profile=None, mem_fraction_static=0.793, max_running_requests=None, max_queued_requests=None, max_total_tokens=None, chunked_prefill_size=8192, enable_dynamic_chunking=False, max_prefill_tokens=16384, prefill_max_requests=None, schedule_policy='fcfs', enable_priority_scheduling=False, disable_priority_preemption=False, default_priority_value=None, abort_on_priority_when_disabled=False, schedule_low_priority_values_first=False, priority_scheduling_preemption_threshold=10, schedule_conservativeness=1.0, page_size=128, swa_full_tokens_ratio=0.8, disable_hybrid_swa_memory=False, radix_eviction_policy='lru', enable_prefill_delayer=False, prefill_delayer_max_delay_passes=30, prefill_delayer_token_usage_low_watermark=None, prefill_delayer_forward_passes_buckets=None, prefill_delayer_wait_seconds_buckets=None, prefill_delayer_queue_min_ratio=None, prefill_delayer_max_delay_ms=None, device='npu', tp_size=1, pp_size=1, pp_max_micro_batch_size=None, pp_async_batch_depth=0, stream_interval=1, batch_notify_size=16, stream_response_default_include_usage=False, incremental_streaming_output=False, enable_streaming_session=False, random_seed=1, constrained_json_whitespace_pattern=None, constrained_json_disable_any_whitespace=False, watchdog_timeout=300, soft_watchdog_timeout=None, dist_timeout=None, download_dir=None, model_checksum=None, base_gpu_id=0, gpu_id_step=1, sleep_on_idle=False, load_snapshot_publish_interval=15, use_ray=False, custom_sigquit_handler=None, log_level='info', log_level_http=None, log_requests=False, log_requests_level=2, log_requests_format='text', log_requests_target=None, uvicorn_access_log_exclude_prefixes=[], crash_dump_folder=None, show_time_cost=False, enable_metrics=False, grpc_http_sidecar_port=None, enable_mfu_metrics=False, enable_metrics_for_all_schedulers=False, tokenizer_metrics_custom_labels_header='x-custom-labels', tokenizer_metrics_allowed_custom_labels=None, extra_metric_labels=None, bucket_time_to_first_token=None, bucket_inter_token_latency=None, bucket_e2e_request_latency=None, prompt_tokens_buckets=None, generation_tokens_buckets=None, gc_warning_threshold_secs=0.0, decode_log_interval=40, enable_request_time_stats_logging=False, kv_events_config=None, enable_forward_pass_metrics=False, forward_pass_metrics_worker_id='', forward_pass_metrics_ipc_name=None, enable_trace=False, trace_modules='request', otlp_traces_endpoint='localhost:4317', export_metrics_to_file=False, export_metrics_to_file_dir=None, stat_loggers=None, api_key=None, admin_api_key=None, served_model_name='/mnt/models/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32', weight_version='default', chat_template=None, hf_chat_template_name=None, completion_template=None, file_storage_path='sglang_storage', enable_cache_report=False, reasoning_parser=None, strip_thinking_cache=False, enable_strict_thinking=False, tool_call_parser=None, tool_server=None, sampling_defaults='model', asr_max_buffer_seconds=60, asr_max_concurrent_sessions=32, dp_size=1, load_balance_method='round_robin', attn_cp_size=1, moe_dp_size=1, dist_init_addr=None, nnodes=1, node_rank=0, json_model_override_args='{}', preferred_sampling_params=None, enable_lora=None, enable_lora_overlap_loading=None, max_lora_rank=None, lora_target_modules=None, lora_paths=None, max_loaded_loras=None, max_loras_per_batch=8, lora_eviction_policy='lru', lora_backend='csgmv', max_lora_chunk_size=16, experts_shared_outer_loras=None, lora_use_virtual_experts=False, lora_strict_loading=False, lora_drain_wait_threshold=0.0, attention_backend='ascend', decode_attention_backend='ascend', prefill_attention_backend='ascend', sampling_backend='pytorch', grammar_backend='xgrammar', radix_cache_backend=None, mm_attention_backend=None, fp8_gemm_runner_backend='auto', fp4_gemm_runner_backend='auto', dsa_prefill_backend=None, dsa_decode_backend=None, dsa_topk_backend='sgl-kernel', disable_flashinfer_autotune=False, mamba_backend='triton', speculative_algorithm=None, speculative_draft_model_path=None, speculative_draft_model_revision=None, speculative_draft_load_format=None, speculative_num_steps=None, speculative_eagle_topk=None, speculative_num_draft_tokens=None, speculative_dflash_block_size=None, speculative_accept_threshold_single=1.0, speculative_accept_threshold_acc=1.0, speculative_token_map=None, speculative_attention_mode='prefill', speculative_draft_attention_backend=None, speculative_draft_window_size=None, speculative_moe_runner_backend='auto', speculative_moe_a2a_backend=None, speculative_draft_model_quantization=None, speculative_skip_dp_mlp_sync=False, speculative_ngram_min_bfs_breadth=1, speculative_ngram_max_bfs_breadth=10, speculative_ngram_match_type='BFS', speculative_ngram_max_trie_depth=18, speculative_ngram_capacity=10000000, speculative_ngram_external_corpus_path=None, speculative_ngram_external_sam_budget=0, speculative_ngram_external_corpus_max_tokens=10000000, enable_multi_layer_eagle=False, speculative_adaptive=False, speculative_adaptive_config=None, ep_size=1, moe_a2a_backend='none', moe_runner_backend='auto', flashinfer_mxfp4_moe_precision='default', enable_flashinfer_allreduce_fusion=False, enforce_disable_flashinfer_allreduce_fusion=False, enable_aiter_allreduce_fusion=False, deepep_mode='auto', deepep_dispatcher_output_dtype='auto', ep_num_redundant_experts=0, ep_dispatch_algorithm=None, init_expert_location='trivial', enable_eplb=False, eplb_algorithm='auto', eplb_rebalance_num_iterations=1000, eplb_rebalance_layers_per_chunk=None, eplb_min_rebalancing_utilization_threshold=1.0, expert_distribution_recorder_mode=None, expert_distribution_recorder_buffer_size=1000, enable_expert_distribution_metrics=False, deepep_config=None, moe_dense_tp_size=None, elastic_ep_backend=None, enable_elastic_expert_backup=False, mooncake_ib_device=None, enable_deepep_waterfill=False, elastic_ep_rejoin=False, max_mamba_cache_size=None, mamba_ssm_dtype=None, mamba_full_memory_ratio=0.9, mamba_scheduler_strategy='no_buffer', mamba_track_interval=256, linear_attn_backend='triton', linear_attn_decode_backend=None, linear_attn_prefill_backend=None, enable_hierarchical_cache=False, hicache_ratio=2.0, hicache_size=0, hicache_write_policy='write_through', hicache_io_backend='kernel', hicache_mem_layout='layer_first', hicache_storage_backend=None, hicache_storage_prefetch_policy='timeout', hicache_storage_backend_extra_config=None, enable_hisparse=False, hisparse_config=None, enable_lmcache=False, lmcache_config_file=None, kt_weight_path=None, kt_method='AMXINT4', kt_cpuinfer=None, kt_threadpool_count=2, kt_num_gpu_experts=None, kt_max_deferred_experts_per_token=None, dllm_algorithm=None, dllm_algorithm_config=None, cpu_offload_gb=0, offload_group_size=-1, offload_num_in_group=1, offload_prefetch_step=1, offload_mode='cpu', enable_mis=False, disable_radix_cache=False, cuda_graph_max_bs=8, cuda_graph_bs=[1, 2, 4, 8], disable_cuda_graph=False, disable_cuda_graph_padding=False, enable_breakable_cuda_graph=False, enable_profile_cuda_graph=False, enable_cudagraph_gc=False, debug_cuda_graph=False, enable_layerwise_nvtx_marker=False, enable_nccl_nvls=False, enable_symm_mem=False, disable_flashinfer_cutlass_moe_fp4_allgather=False, enable_tokenizer_batch_encode=False, disable_tokenizer_batch_decode=False, disable_outlines_disk_cache=False, disable_custom_all_reduce=True, enable_mscclpp=False, enable_torch_symm_mem=False, pre_warm_nccl=False, disable_overlap_schedule=False, enable_mixed_chunk=False, enable_dp_attention=False, enable_dp_attention_local_control_broadcast=False, enable_dp_lm_head=False, enable_two_batch_overlap=False, enable_single_batch_overlap=False, tbo_token_distribution_threshold=0.48, enable_torch_compile=False, disable_piecewise_cuda_graph=True, enforce_piecewise_cuda_graph=False, enable_torch_compile_debug_mode=False, torch_compile_max_bs=32, piecewise_cuda_graph_max_tokens=8192, piecewise_cuda_graph_tokens=[4, 8, 12, 16, 20, 24, 28, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1280, 1536, 1792, 2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840, 4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192], piecewise_cuda_graph_compiler='eager', torchao_config='', enable_p2p_check=False, triton_attention_reduce_in_fp32=False, triton_attention_num_kv_splits=8, triton_attention_split_tile_size=None, num_continuous_decode_steps=1, delete_ckpt_after_loading=False, enable_memory_saver=False, enable_weights_cpu_backup=False, enable_draft_weights_cpu_backup=False, allow_auto_truncate=False, enable_custom_logit_processor=False, flashinfer_mla_disable_ragged=False, disable_shared_experts_fusion=False, enforce_shared_experts_fusion=False, disable_chunked_prefix_cache=False, disable_fast_image_processor=False, keep_mm_feature_on_device=False, enable_return_hidden_states=False, enable_return_routed_experts=False, enable_return_indexer_topk=False, enable_deepseek_v4_fp4_indexer=False, scheduler_recv_interval=1, numa_node=None, enable_deterministic_inference=False, rl_on_policy_target=None, enable_attn_tp_input_scattered=False, disable_attn_tp_gather=False, gc_threshold=None, kv_canary='none', kv_canary_real_data='none', kv_canary_sweep_interval=0, enable_dsa_prefill_context_parallel=False, dsa_prefill_cp_mode='round-robin-split', enable_fused_qk_norm_rope=False, enable_precise_embedding_interpolation=False, enable_fused_moe_sum_all_reduce=False, enable_prefill_context_parallel=False, prefill_cp_mode='in-seq-split', enable_dynamic_batch_tokenizer=False, dynamic_batch_tokenizer_batch_size=32, dynamic_batch_tokenizer_batch_timeout=0.002, debug_tensor_dump_output_folder=None, debug_tensor_dump_layers=None, debug_tensor_dump_input_file=None, debug_tensor_dump_inject=False, disaggregation_mode='null', disaggregation_transfer_backend='mooncake', disaggregation_bootstrap_port=8998, disaggregation_ib_device=None, disaggregation_decode_enable_radix_cache=False, disaggregation_decode_enable_offload_kvcache=False, num_reserved_decode_tokens=512, disaggregation_decode_polling_interval=1, optimistic_prefill_retries=0, encoder_only=False, language_only=False, encoder_transfer_backend='zmq_to_scheduler', encoder_urls=[], encoder_bootstrap_port=8997, encoder_register_urls=[], enable_adaptive_dispatch_to_encoder=False, custom_weight_loader=[], weight_loader_disable_mmap=False, weight_loader_prefetch_checkpoints=False, weight_loader_prefetch_num_threads=4, weight_loader_drop_cache_after_load=False, remote_instance_weight_loader_seed_instance_ip=None, remote_instance_weight_loader_seed_instance_service_port=None, remote_instance_weight_loader_send_weights_group_ports=None, remote_instance_weight_loader_backend='nccl', remote_instance_weight_loader_start_seed_via_transfer_engine=False, engine_info_bootstrap_port=6789, modelexpress_config=None, enable_pdmux=False, pdmux_config_path=None, sm_group_num=8, enable_broadcast_mm_inputs_process=False, enable_prefix_mm_cache=False, mm_enable_dp_encoder=False, mm_process_config={}, limit_mm_data_per_request=None, enable_mm_global_cache=False, decrypted_config_file=None, decrypted_draft_config_file=None, forward_hooks=None, enable_quant_communications=False, msprobe_dump_config=None)
+[2026-07-13 08:28:14] Using default HuggingFace chat template with detected content format: string
+/usr/local/python3.11.15/lib/python3.11/site-packages/torch_npu/contrib/transfer_to_npu.py:362: ImportWarning: 
+    *************************************************************************************************************
+    The torch.Tensor.cuda and torch.nn.Module.cuda are replaced with torch.Tensor.npu and torch.nn.Module.npu now..
+    The torch.cuda.DoubleTensor is replaced with torch.npu.FloatTensor cause the double type is not supported now..
+    The backend in torch.distributed.init_process_group set to hccl now..
+    The torch.cuda.* and torch.cuda.amp.* are replaced with torch.npu.* and torch.npu.amp.* now..
+    The device parameters have been replaced with npu in the function below:
+    torch.logspace, torch.randint, torch.hann_window, torch.rand, torch.full_like, torch.ones_like, torch.rand_like, torch.randperm, torch.arange, torch.frombuffer, torch.normal, torch._empty_per_channel_affine_quantized, torch.empty_strided, torch.empty_like, torch.scalar_tensor, torch.tril_indices, torch.bartlett_window, torch.ones, torch.sparse_coo_tensor, torch.randn, torch.kaiser_window, torch.tensor, torch.triu_indices, torch.as_tensor, torch.zeros, torch.randint_like, torch.full, torch.eye, torch._sparse_csr_tensor_unsafe, torch.empty, torch._sparse_coo_tensor_unsafe, torch.blackman_window, torch.zeros_like, torch.range, torch.sparse_csr_tensor, torch.randn_like, torch.from_file, torch._cudnn_init_dropout_state, torch._empty_affine_quantized, torch.linspace, torch.hamming_window, torch.empty_quantized, torch._pin_memory, torch.load, torch.set_default_device, torch.get_device_module, torch.sparse_compressed_tensor, torch.Tensor.new_empty, torch.Tensor.new_empty_strided, torch.Tensor.new_full, torch.Tensor.new_ones, torch.Tensor.new_tensor, torch.Tensor.new_zeros, torch.Tensor.to, torch.Tensor.pin_memory, torch.nn.Module.to, torch.nn.Module.to_empty
+    *************************************************************************************************************
+    
+  warnings.warn(msg, ImportWarning)
+/usr/local/python3.11.15/lib/python3.11/site-packages/torch_npu/contrib/transfer_to_npu.py:291: RuntimeWarning: torch.jit.script and torch.jit.script_method will be disabled by transfer_to_npu, which currently does not support them, if you need to enable them, please do not use transfer_to_npu.
+  warnings.warn(msg, RuntimeWarning)
+[2026-07-13 08:28:33] Init torch distributed begin.
+[W713 08:28:54.606907850 socket.cpp:207] [c10d] The hostname of the client socket cannot be retrieved. err=-3
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[2026-07-13 08:28:54] Init torch distributed ends. elapsed=21.48 s, mem usage=0.01 GB
+[2026-07-13 08:28:55] Ignore import error when loading sglang.srt.models.bailing_moe_linear: No module named 'vllm'
+[2026-07-13 08:28:55] Ignore import error when loading sglang.srt.models.bailing_moe_nextn: No module named 'vllm'
+[2026-07-13 08:28:55] Ignore import error when loading sglang.srt.models.deepseek_v4: No module named 'tilelang'
+[2026-07-13 08:28:55] Ignore import error when loading sglang.srt.models.deepseek_v4_nextn: No module named 'tilelang'
+[2026-07-13 08:28:56] Ignore import error when loading sglang.srt.models.mindspore: No module named 'mindspore'
+[2026-07-13 08:28:57] Load weight begin. avail mem=60.50 GB
+[2026-07-13 08:28:57] Using NPUCompressedTensorsW4A16 (Linear)
+[2026-07-13 08:28:57] [MoE Offload] Layer 0 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:57] [MoE Offload] Created MoEInfer handle for layer 0: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:57] [MoE Offload] Layer 1 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:57] [MoE Offload] Created MoEInfer handle for layer 1: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:57] [MoE Offload] Layer 2 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:57] [MoE Offload] Created MoEInfer handle for layer 2: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:57] [MoE Offload] Layer 3 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:57] [MoE Offload] Created MoEInfer handle for layer 3: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:57] [MoE Offload] Layer 4 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:57] [MoE Offload] Created MoEInfer handle for layer 4: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:57] [MoE Offload] Layer 5 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 5: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 6 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 6: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 7 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 7: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 8 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 8: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 9 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 9: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 10 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 10: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 11 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 11: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 12 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 12: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 13 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 13: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 14 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 14: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 15 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 15: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 16 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:58] [MoE Offload] Created MoEInfer handle for layer 16: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:58] [MoE Offload] Layer 17 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 17: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 18 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 18: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 19 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 19: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 20 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 20: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 21 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 21: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 22 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 22: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 23 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 23: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 24 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 24: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 25 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 25: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 26 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 26: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 27 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 27: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 28 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:28:59] [MoE Offload] Created MoEInfer handle for layer 28: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:28:59] [MoE Offload] Layer 29 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 29: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 30 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 30: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 31 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 31: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 32 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 32: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 33 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 33: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 34 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 34: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 35 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 35: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 36 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 36: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 37 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 37: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 38 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 38: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 39 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 39: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 40 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:00] [MoE Offload] Created MoEInfer handle for layer 40: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:00] [MoE Offload] Layer 41 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:01] [MoE Offload] Created MoEInfer handle for layer 41: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:01] [MoE Offload] Layer 42 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:01] [MoE Offload] Created MoEInfer handle for layer 42: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:01] [MoE Offload] Layer 43 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:01] [MoE Offload] Created MoEInfer handle for layer 43: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:01] [MoE Offload] Layer 44 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:01] [MoE Offload] Created MoEInfer handle for layer 44: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:01] [MoE Offload] Layer 45 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:01] [MoE Offload] Created MoEInfer handle for layer 45: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:01] [MoE Offload] Layer 46 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:01] [MoE Offload] Created MoEInfer handle for layer 46: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+[2026-07-13 08:29:01] [MoE Offload] Layer 47 will be offloaded to CPU (Start Layer: 0, Quant Type: q4_0)
+[2026-07-13 08:29:01] [MoE Offload] Created MoEInfer handle for layer 47: experts=128, hidden_size=2048, intermediate_size=768, quant_type=Q4_0, group_size=32
+Multi-thread loading shards:   0% Completed | 0/4 [00:00<?, ?it/s]Multi-thread loading shards:  25% Completed | 1/4 [00:10<00:30, 10.02s/it]Multi-thread loading shards:  50% Completed | 2/4 [00:15<00:14,  7.15s/it]Multi-thread loading shards:  75% Completed | 3/4 [00:20<00:06,  6.34s/it]Multi-thread loading shards: 100% Completed | 4/4 [00:23<00:00,  4.91s/it]Multi-thread loading shards: 100% Completed | 4/4 [00:23<00:00,  5.81s/it]
+[2026-07-13 08:29:25] [MoE Offload] Layer 0: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:25] [MoE Offload] Layer 1: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:25] [MoE Offload] Layer 2: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:25] [MoE Offload] Layer 3: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:25] [MoE Offload] Layer 4: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:25] [MoE Offload] Layer 5: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 6: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 7: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 8: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 9: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 10: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 11: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 12: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 13: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 14: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 15: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 16: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 17: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 18: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 19: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:26] [MoE Offload] Layer 20: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 21: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 22: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 23: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 24: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 25: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 26: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 27: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 28: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 29: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 30: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 31: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 32: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:27] [MoE Offload] Layer 33: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 34: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 35: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 36: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 37: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 38: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 39: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 40: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 41: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 42: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 43: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 44: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 45: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 46: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] [MoE Offload] Layer 47: Stored pre-quantized int4 weights in CPU memory (experts=128)
+[2026-07-13 08:29:28] Load weight end. elapsed=31.49 s, type=Qwen3MoeForCausalLM, quant=compressed-tensors, avail mem=58.56 GB, mem usage=1.94 GB.
+[2026-07-13 08:29:28] Max concurrent requests (per dp worker) from the finalized token capacity: max_num_reqs=2048.
+[2026-07-13 08:29:30] KV Cache is allocated. dtype: torch.bfloat16, #tokens: 502784, K size: 23.02 GB, V size: 23.02 GB
+[2026-07-13 08:29:30] Memory pool end. avail mem=10.52 GB
+[2026-07-13 08:29:30] Capture npu graph begin. This can take up to several minutes. avail mem=10.52 GB
+[2026-07-13 08:29:30] Capture cuda graph bs [1, 2, 4, 8]
+  0%|          | 0/4 [00:00<?, ?it/s]Capturing batches (bs=8 avail_mem=10.52 GB):   0%|          | 0/4 [00:00<?, ?it/s][2026-07-13 08:29:33] [MoE Offload] Created NpuCallbackManager. device_id=0, stream_ptr=187652213257952
+Capturing batches (bs=8 avail_mem=10.52 GB):  25%|██▌       | 1/4 [00:02<00:07,  2.51s/it]Capturing batches (bs=4 avail_mem=10.15 GB):  25%|██▌       | 1/4 [00:02<00:07,  2.51s/it]Capturing batches (bs=4 avail_mem=10.15 GB):  50%|█████     | 2/4 [00:02<00:02,  1.31s/it]Capturing batches (bs=2 avail_mem=10.13 GB):  50%|█████     | 2/4 [00:02<00:02,  1.31s/it]Capturing batches (bs=2 avail_mem=10.13 GB):  75%|███████▌  | 3/4 [00:03<00:00,  1.08it/s]Capturing batches (bs=1 avail_mem=10.12 GB):  75%|███████▌  | 3/4 [00:03<00:00,  1.08it/s]Capturing batches (bs=1 avail_mem=10.12 GB): 100%|██████████| 4/4 [00:03<00:00,  1.34it/s]Capturing batches (bs=1 avail_mem=10.12 GB): 100%|██████████| 4/4 [00:03<00:00,  1.02it/s]
+[2026-07-13 08:29:36] Capture npu graph end. Time elapsed: 5.55 s. mem usage=0.39 GB. avail mem=10.13 GB.
+[2026-07-13 08:29:36] Disable piecewise CUDA graph because --disable-piecewise-cuda-graph is set
+/sgl-workspace/sglang/python/sglang/srt/utils/common.py:1427: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:213.)
+  tensor_data = torch.ByteTensor(
+[2026-07-13 08:29:37] max_total_num_tokens=502784, chunked_prefill_size=8192, max_prefill_tokens=16384, max_running_requests=2048, context_len=262144, available_gpu_mem=10.13 GB
+[2026-07-13 08:29:37] Tree cache initialized: source=default impl=RadixCache hybrid_swa=False hybrid_ssm=False hierarchical=False streaming_wrapped=False
+[2026-07-13 08:29:38] INFO:     Started server process [2650791]
+[2026-07-13 08:29:38] INFO:     Waiting for application startup.
+[2026-07-13 08:29:38] Using default chat sampling params from model generation config: {'temperature': 0.7, 'top_k': 20, 'top_p': 0.8}
+[2026-07-13 08:29:38] INFO:     Application startup complete.
+[2026-07-13 08:29:38] INFO:     Uvicorn running on http://127.0.0.1:31000 (Press CTRL+C to quit)
+[2026-07-13 08:29:39] get env no_proxy = localhost,127.0.0.1,::1
+[2026-07-13 08:29:39] INFO:     127.0.0.1:50292 - "GET /model_info HTTP/1.1" 200 OK
+[2026-07-13 08:29:39] get env HOSTNAME = a13-10u-a800t-a2-gpuserver-04
+[2026-07-13 08:29:39] [MoE Offload] Created NpuCallbackManager. device_id=0, stream_ptr=187652212319216
+[2026-07-13 08:29:39] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 57.93
+[2026-07-13 08:29:39] INFO:     127.0.0.1:50316 - "GET /health HTTP/1.1" 503 Service Unavailable
+[2026-07-13 08:29:39] INFO:     127.0.0.1:50300 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:29:39] The server is fired up and ready to roll!
+[2026-07-13 08:29:41] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 58.21
+[2026-07-13 08:29:42] INFO:     127.0.0.1:50318 - "GET /health HTTP/1.1" 200 OK
+/usr/local/python3.11.15/lib/python3.11/site-packages/fastapi/routing.py:136: FastAPIDeprecationWarning: ORJSONResponse is deprecated, FastAPI now serializes data directly to JSON bytes via Pydantic when a return type or response model is set, which is faster and doesn't need a custom response class. Read more in the FastAPI docs: https://fastapi.tiangolo.com/advanced/custom-response/#orjson-or-response-model and https://fastapi.tiangolo.com/tutorial/response-model/
+  response = await f(request)
+[2026-07-13 08:29:59] INFO:     127.0.0.1:51844 - "GET /v1/models HTTP/1.1" 200 OK
+[2026-07-13 08:29:59] INFO:     127.0.0.1:51860 - "GET /v1/models HTTP/1.1" 200 OK
+[2026-07-13 08:30:11] INFO:     127.0.0.1:41238 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:30:11] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 4.25
+[2026-07-13 08:30:12] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 1.13, #queue-req: 0
+[2026-07-13 08:30:13] INFO:     127.0.0.1:41244 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:30:14] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 63.09
+[2026-07-13 08:30:14] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 18.43, #queue-req: 0
+[2026-07-13 08:30:15] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.24, #queue-req: 0
+[2026-07-13 08:30:17] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.28, #queue-req: 0
+[2026-07-13 08:30:18] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.05, #queue-req: 0
+[2026-07-13 08:30:19] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.39, #queue-req: 0
+[2026-07-13 08:30:20] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.24, #queue-req: 0
+[2026-07-13 08:30:21] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.29, #queue-req: 0
+[2026-07-13 08:30:22] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.10, #queue-req: 0
+[2026-07-13 08:30:22] INFO:     127.0.0.1:58192 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:30:22] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 15.42
+[2026-07-13 08:30:23] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 35.22, #queue-req: 0
+[2026-07-13 08:30:24] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.60, #queue-req: 0
+[2026-07-13 08:30:25] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.79, #queue-req: 0
+[2026-07-13 08:30:26] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.99, #queue-req: 0
+[2026-07-13 08:30:26] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.03, #queue-req: 0
+[2026-07-13 08:30:27] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.68, #queue-req: 0
+[2026-07-13 08:30:28] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.03, #queue-req: 0
+[2026-07-13 08:30:29] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.13, #queue-req: 0
+[2026-07-13 08:30:29] INFO:     127.0.0.1:54778 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:30:31] Prefill batch, #new-seq: 1, #new-token: 640, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 70.81
+[2026-07-13 08:30:32] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 15.88, #queue-req: 0
+[2026-07-13 08:30:33] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.94, #queue-req: 0
+[2026-07-13 08:30:34] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.17, #queue-req: 0
+[2026-07-13 08:30:35] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.47, #queue-req: 0
+[2026-07-13 08:30:36] Decode batch, #running-req: 1, #token: 896, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.73, #queue-req: 0
+[2026-07-13 08:30:37] Decode batch, #running-req: 1, #token: 896, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.76, #queue-req: 0
+[2026-07-13 08:30:38] Decode batch, #running-req: 1, #token: 896, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.52, #queue-req: 0
+[2026-07-13 08:30:39] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.07, #queue-req: 0
+[2026-07-13 08:30:39] INFO:     127.0.0.1:60356 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:30:39] Prefill batch, #new-seq: 1, #new-token: 384, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 45.15
+[2026-07-13 08:30:40] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 23.19, #queue-req: 0
+[2026-07-13 08:30:41] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.70, #queue-req: 0
+[2026-07-13 08:30:42] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.13, #queue-req: 0
+[2026-07-13 08:30:43] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.97, #queue-req: 0
+[2026-07-13 08:30:44] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.30, #queue-req: 0
+[2026-07-13 08:30:45] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.25, #queue-req: 0
+[2026-07-13 08:30:46] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.62, #queue-req: 0
+[2026-07-13 08:30:47] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.17, #queue-req: 0
+[2026-07-13 08:30:47] INFO:     127.0.0.1:54272 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:30:47] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 16.53
+[2026-07-13 08:30:48] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 36.57, #queue-req: 0
+[2026-07-13 08:30:49] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.71, #queue-req: 0
+[2026-07-13 08:30:50] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.13, #queue-req: 0
+[2026-07-13 08:30:51] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.21, #queue-req: 0
+[2026-07-13 08:30:52] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.41, #queue-req: 0
+[2026-07-13 08:30:53] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.56, #queue-req: 0
+[2026-07-13 08:30:54] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.11, #queue-req: 0
+[2026-07-13 08:30:54] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.93, #queue-req: 0
+[2026-07-13 08:30:54] INFO:     127.0.0.1:54808 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:30:55] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 16.88
+[2026-07-13 08:30:56] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 35.96, #queue-req: 0
+[2026-07-13 08:30:57] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.20, #queue-req: 0
+[2026-07-13 08:30:57] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.29, #queue-req: 0
+[2026-07-13 08:30:58] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.37, #queue-req: 0
+[2026-07-13 08:30:59] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.97, #queue-req: 0
+[2026-07-13 08:31:00] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.16, #queue-req: 0
+[2026-07-13 08:31:01] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.10, #queue-req: 0
+[2026-07-13 08:31:02] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.90, #queue-req: 0
+[2026-07-13 08:31:02] INFO:     127.0.0.1:54824 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:31:03] Prefill batch, #new-seq: 1, #new-token: 384, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 46.75
+[2026-07-13 08:31:04] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 23.16, #queue-req: 0
+[2026-07-13 08:31:05] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.46, #queue-req: 0
+[2026-07-13 08:31:06] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.41, #queue-req: 0
+[2026-07-13 08:31:07] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.04, #queue-req: 0
+[2026-07-13 08:31:08] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.46, #queue-req: 0
+[2026-07-13 08:31:08] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.94, #queue-req: 0
+[2026-07-13 08:31:09] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.16, #queue-req: 0
+[2026-07-13 08:31:10] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.02, #queue-req: 0
+[2026-07-13 08:31:10] INFO:     127.0.0.1:58094 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:31:11] Prefill batch, #new-seq: 1, #new-token: 256, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 32.10
+[2026-07-13 08:31:12] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 27.81, #queue-req: 0
+[2026-07-13 08:31:13] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.88, #queue-req: 0
+[2026-07-13 08:31:14] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.68, #queue-req: 0
+[2026-07-13 08:31:15] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.42, #queue-req: 0
+[2026-07-13 08:31:16] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.86, #queue-req: 0
+[2026-07-13 08:31:16] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.05, #queue-req: 0
+[2026-07-13 08:31:17] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.15, #queue-req: 0
+[2026-07-13 08:31:18] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.22, #queue-req: 0
+[2026-07-13 08:31:18] INFO:     127.0.0.1:59808 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:31:20] Prefill batch, #new-seq: 1, #new-token: 512, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 59.28
+[2026-07-13 08:31:20] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 18.75, #queue-req: 0
+[2026-07-13 08:31:21] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.12, #queue-req: 0
+[2026-07-13 08:31:22] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.23, #queue-req: 0
+[2026-07-13 08:31:23] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.69, #queue-req: 0
+[2026-07-13 08:31:24] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.46, #queue-req: 0
+[2026-07-13 08:31:25] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.66, #queue-req: 0
+[2026-07-13 08:31:26] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.73, #queue-req: 0
+[2026-07-13 08:31:27] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.55, #queue-req: 0
+[2026-07-13 08:31:27] INFO:     127.0.0.1:36554 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:31:28] Prefill batch, #new-seq: 1, #new-token: 256, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 32.08
+[2026-07-13 08:31:28] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 29.16, #queue-req: 0
+[2026-07-13 08:31:29] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.27, #queue-req: 0
+[2026-07-13 08:31:30] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.50, #queue-req: 0
+[2026-07-13 08:31:31] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.28, #queue-req: 0
+[2026-07-13 08:31:32] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.26, #queue-req: 0
+[2026-07-13 08:31:33] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.02, #queue-req: 0
+[2026-07-13 08:31:34] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.08, #queue-req: 0
+[2026-07-13 08:31:35] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.16, #queue-req: 0
+[2026-07-13 08:31:35] INFO:     127.0.0.1:57710 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:31:40] Prefill batch, #new-seq: 1, #new-token: 2304, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 182.00
+[2026-07-13 08:31:41] Decode batch, #running-req: 1, #token: 2304, token usage: 0.00, npu graph: True, gen throughput (token/s): 6.39, #queue-req: 0
+[2026-07-13 08:31:42] Decode batch, #running-req: 1, #token: 2304, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.67, #queue-req: 0
+[2026-07-13 08:31:43] Decode batch, #running-req: 1, #token: 2432, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.80, #queue-req: 0
+[2026-07-13 08:31:44] Decode batch, #running-req: 1, #token: 2432, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.92, #queue-req: 0
+[2026-07-13 08:31:45] Decode batch, #running-req: 1, #token: 2432, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.06, #queue-req: 0
+[2026-07-13 08:31:46] Decode batch, #running-req: 1, #token: 2560, token usage: 0.01, npu graph: True, gen throughput (token/s): 40.73, #queue-req: 0
+[2026-07-13 08:31:47] Decode batch, #running-req: 1, #token: 2560, token usage: 0.01, npu graph: True, gen throughput (token/s): 40.84, #queue-req: 0
+[2026-07-13 08:31:48] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.32, #queue-req: 0
+[2026-07-13 08:31:48] INFO:     127.0.0.1:49056 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:31:49] Prefill batch, #new-seq: 1, #new-token: 384, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 43.47
+[2026-07-13 08:31:50] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 21.05, #queue-req: 0
+[2026-07-13 08:31:51] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.97, #queue-req: 0
+[2026-07-13 08:31:52] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.91, #queue-req: 0
+[2026-07-13 08:31:53] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.03, #queue-req: 0
+[2026-07-13 08:31:54] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.66, #queue-req: 0
+[2026-07-13 08:31:55] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.38, #queue-req: 0
+[2026-07-13 08:31:56] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.78, #queue-req: 0
+[2026-07-13 08:31:57] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.94, #queue-req: 0
+[2026-07-13 08:31:57] INFO:     127.0.0.1:40882 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:31:58] Prefill batch, #new-seq: 1, #new-token: 512, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 57.38
+[2026-07-13 08:31:59] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 19.46, #queue-req: 0
+[2026-07-13 08:32:00] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.87, #queue-req: 0
+[2026-07-13 08:32:01] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.46, #queue-req: 0
+[2026-07-13 08:32:02] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.17, #queue-req: 0
+[2026-07-13 08:32:03] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.02, #queue-req: 0
+[2026-07-13 08:32:04] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.01, #queue-req: 0
+[2026-07-13 08:32:05] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.07, #queue-req: 0
+[2026-07-13 08:32:06] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.28, #queue-req: 0
+[2026-07-13 08:32:06] INFO:     127.0.0.1:59022 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:32:06] Prefill batch, #new-seq: 1, #new-token: 256, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 30.37
+[2026-07-13 08:32:07] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 24.96, #queue-req: 0
+[2026-07-13 08:32:08] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.59, #queue-req: 0
+[2026-07-13 08:32:09] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.64, #queue-req: 0
+[2026-07-13 08:32:10] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.03, #queue-req: 0
+[2026-07-13 08:32:11] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.37, #queue-req: 0
+[2026-07-13 08:32:12] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.00, #queue-req: 0
+[2026-07-13 08:32:13] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.03, #queue-req: 0
+[2026-07-13 08:32:14] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.29, #queue-req: 0
+[2026-07-13 08:32:14] INFO:     127.0.0.1:59032 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:32:15] Prefill batch, #new-seq: 1, #new-token: 384, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 45.78
+[2026-07-13 08:32:16] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 21.97, #queue-req: 0
+[2026-07-13 08:32:17] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 32.19, #queue-req: 0
+[2026-07-13 08:32:18] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.33, #queue-req: 0
+[2026-07-13 08:32:19] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 39.26, #queue-req: 0
+[2026-07-13 08:32:20] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.47, #queue-req: 0
+[2026-07-13 08:32:21] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.46, #queue-req: 0
+[2026-07-13 08:32:22] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.33, #queue-req: 0
+[2026-07-13 08:32:23] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.96, #queue-req: 0
+[2026-07-13 08:32:23] INFO:     127.0.0.1:36660 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:32:28] Prefill batch, #new-seq: 1, #new-token: 2176, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 167.35
+[2026-07-13 08:32:29] Decode batch, #running-req: 1, #token: 2176, token usage: 0.00, npu graph: True, gen throughput (token/s): 6.66, #queue-req: 0
+[2026-07-13 08:32:30] Decode batch, #running-req: 1, #token: 2304, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.69, #queue-req: 0
+[2026-07-13 08:32:31] Decode batch, #running-req: 1, #token: 2304, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.14, #queue-req: 0
+[2026-07-13 08:32:32] Decode batch, #running-req: 1, #token: 2304, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.82, #queue-req: 0
+[2026-07-13 08:32:33] Decode batch, #running-req: 1, #token: 2432, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.00, #queue-req: 0
+[2026-07-13 08:32:34] Decode batch, #running-req: 1, #token: 2432, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.00, #queue-req: 0
+[2026-07-13 08:32:35] Decode batch, #running-req: 1, #token: 2432, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.51, #queue-req: 0
+[2026-07-13 08:32:36] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.57, #queue-req: 0
+[2026-07-13 08:32:36] INFO:     127.0.0.1:55152 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:32:36] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 15.98
+[2026-07-13 08:32:37] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 35.96, #queue-req: 0
+[2026-07-13 08:32:38] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.60, #queue-req: 0
+[2026-07-13 08:32:39] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.12, #queue-req: 0
+[2026-07-13 08:32:39] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.94, #queue-req: 0
+[2026-07-13 08:32:40] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.96, #queue-req: 0
+[2026-07-13 08:32:41] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.06, #queue-req: 0
+[2026-07-13 08:32:42] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.85, #queue-req: 0
+[2026-07-13 08:32:43] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.49, #queue-req: 0
+[2026-07-13 08:32:43] INFO:     127.0.0.1:55164 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:32:44] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 16.36
+[2026-07-13 08:32:45] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 32.99, #queue-req: 0
+[2026-07-13 08:32:45] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.29, #queue-req: 0
+[2026-07-13 08:32:46] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.05, #queue-req: 0
+[2026-07-13 08:32:47] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.52, #queue-req: 0
+[2026-07-13 08:32:48] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.11, #queue-req: 0
+[2026-07-13 08:32:49] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.75, #queue-req: 0
+[2026-07-13 08:32:50] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.45, #queue-req: 0
+[2026-07-13 08:32:51] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.12, #queue-req: 0
+[2026-07-13 08:32:51] INFO:     127.0.0.1:36438 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:32:52] Prefill batch, #new-seq: 1, #new-token: 384, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 45.88
+[2026-07-13 08:32:53] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 22.47, #queue-req: 0
+[2026-07-13 08:32:54] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.06, #queue-req: 0
+[2026-07-13 08:32:55] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.39, #queue-req: 0
+[2026-07-13 08:32:56] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.60, #queue-req: 0
+[2026-07-13 08:32:57] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.30, #queue-req: 0
+[2026-07-13 08:32:58] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.05, #queue-req: 0
+[2026-07-13 08:32:59] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.63, #queue-req: 0
+[2026-07-13 08:32:59] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.32, #queue-req: 0
+[2026-07-13 08:32:59] INFO:     127.0.0.1:35400 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:33:00] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 16.66
+[2026-07-13 08:33:01] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 37.34, #queue-req: 0
+[2026-07-13 08:33:01] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.25, #queue-req: 0
+[2026-07-13 08:33:02] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.69, #queue-req: 0
+[2026-07-13 08:33:03] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.43, #queue-req: 0
+[2026-07-13 08:33:04] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.52, #queue-req: 0
+[2026-07-13 08:33:05] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.92, #queue-req: 0
+[2026-07-13 08:33:06] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.70, #queue-req: 0
+[2026-07-13 08:33:07] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.42, #queue-req: 0
+[2026-07-13 08:33:07] INFO:     127.0.0.1:45680 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:33:07] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 16.54
+[2026-07-13 08:33:08] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 33.70, #queue-req: 0
+[2026-07-13 08:33:09] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.76, #queue-req: 0
+[2026-07-13 08:33:10] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.74, #queue-req: 0
+[2026-07-13 08:33:11] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.70, #queue-req: 0
+[2026-07-13 08:33:12] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.27, #queue-req: 0
+[2026-07-13 08:33:13] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.77, #queue-req: 0
+[2026-07-13 08:33:14] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.22, #queue-req: 0
+[2026-07-13 08:33:15] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.80, #queue-req: 0
+[2026-07-13 08:33:15] INFO:     127.0.0.1:48482 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:33:15] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 16.55
+[2026-07-13 08:33:16] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 37.05, #queue-req: 0
+[2026-07-13 08:33:17] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.55, #queue-req: 0
+[2026-07-13 08:33:18] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.95, #queue-req: 0
+[2026-07-13 08:33:19] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.24, #queue-req: 0
+[2026-07-13 08:33:20] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.43, #queue-req: 0
+[2026-07-13 08:33:21] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.29, #queue-req: 0
+[2026-07-13 08:33:22] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.27, #queue-req: 0
+[2026-07-13 08:33:23] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.29, #queue-req: 0
+[2026-07-13 08:33:23] INFO:     127.0.0.1:48484 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:33:23] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 16.51
+[2026-07-13 08:33:24] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 37.49, #queue-req: 0
+[2026-07-13 08:33:25] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.92, #queue-req: 0
+[2026-07-13 08:33:26] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.31, #queue-req: 0
+[2026-07-13 08:33:27] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.49, #queue-req: 0
+[2026-07-13 08:33:27] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.74, #queue-req: 0
+[2026-07-13 08:33:28] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.96, #queue-req: 0
+[2026-07-13 08:33:29] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.07, #queue-req: 0
+[2026-07-13 08:33:30] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.12, #queue-req: 0
+[2026-07-13 08:33:30] INFO:     127.0.0.1:51682 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:33:30] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 16.82
+[2026-07-13 08:33:31] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 36.18, #queue-req: 0
+[2026-07-13 08:33:32] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.94, #queue-req: 0
+[2026-07-13 08:33:33] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.94, #queue-req: 0
+[2026-07-13 08:33:34] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.85, #queue-req: 0
+[2026-07-13 08:33:35] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.82, #queue-req: 0
+[2026-07-13 08:33:36] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.49, #queue-req: 0
+[2026-07-13 08:33:37] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.99, #queue-req: 0
+[2026-07-13 08:33:38] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.83, #queue-req: 0
+[2026-07-13 08:33:38] INFO:     127.0.0.1:41314 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:33:38] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 16.63
+[2026-07-13 08:33:39] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 35.29, #queue-req: 0
+[2026-07-13 08:33:40] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.20, #queue-req: 0
+[2026-07-13 08:33:41] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.35, #queue-req: 0
+[2026-07-13 08:33:42] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.48, #queue-req: 0
+[2026-07-13 08:33:43] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.53, #queue-req: 0
+[2026-07-13 08:33:44] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.48, #queue-req: 0
+[2026-07-13 08:33:45] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.84, #queue-req: 0
+[2026-07-13 08:33:46] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.47, #queue-req: 0
+[2026-07-13 08:33:46] INFO:     127.0.0.1:41174 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:33:46] Prefill batch, #new-seq: 1, #new-token: 256, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 31.27
+[2026-07-13 08:33:47] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 25.12, #queue-req: 0
+[2026-07-13 08:33:48] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.92, #queue-req: 0
+[2026-07-13 08:33:49] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.03, #queue-req: 0
+[2026-07-13 08:33:50] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.14, #queue-req: 0
+[2026-07-13 08:33:51] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.21, #queue-req: 0
+[2026-07-13 08:33:52] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.08, #queue-req: 0
+[2026-07-13 08:33:53] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.20, #queue-req: 0
+[2026-07-13 08:33:54] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.37, #queue-req: 0
+[2026-07-13 08:33:54] INFO:     127.0.0.1:41186 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:33:54] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 15.87
+[2026-07-13 08:33:55] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 28.40, #queue-req: 0
+[2026-07-13 08:33:56] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.61, #queue-req: 0
+[2026-07-13 08:33:57] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.82, #queue-req: 0
+[2026-07-13 08:33:58] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 40.45, #queue-req: 0
+[2026-07-13 08:33:59] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.06, #queue-req: 0
+[2026-07-13 08:34:00] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.91, #queue-req: 0
+[2026-07-13 08:34:01] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.50, #queue-req: 0
+[2026-07-13 08:34:02] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.61, #queue-req: 0
+[2026-07-13 08:34:02] INFO:     127.0.0.1:50742 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:34:03] Prefill batch, #new-seq: 1, #new-token: 256, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 30.65
+[2026-07-13 08:34:04] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 25.18, #queue-req: 0
+[2026-07-13 08:34:05] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.06, #queue-req: 0
+[2026-07-13 08:34:06] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.33, #queue-req: 0
+[2026-07-13 08:34:07] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.59, #queue-req: 0
+[2026-07-13 08:34:07] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.45, #queue-req: 0
+[2026-07-13 08:34:08] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.15, #queue-req: 0
+[2026-07-13 08:34:09] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.27, #queue-req: 0
+[2026-07-13 08:34:10] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.03, #queue-req: 0
+[2026-07-13 08:34:10] INFO:     127.0.0.1:43754 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:34:11] Prefill batch, #new-seq: 1, #new-token: 256, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 31.54
+[2026-07-13 08:34:12] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 26.87, #queue-req: 0
+[2026-07-13 08:34:13] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.70, #queue-req: 0
+[2026-07-13 08:34:14] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.50, #queue-req: 0
+[2026-07-13 08:34:15] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.78, #queue-req: 0
+[2026-07-13 08:34:16] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.79, #queue-req: 0
+[2026-07-13 08:34:16] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.91, #queue-req: 0
+[2026-07-13 08:34:17] Decode batch, #running-req: 1, #token: 512, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.59, #queue-req: 0
+[2026-07-13 08:34:18] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.50, #queue-req: 0
+[2026-07-13 08:34:18] INFO:     127.0.0.1:43580 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:34:20] Prefill batch, #new-seq: 1, #new-token: 640, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 70.45
+[2026-07-13 08:34:21] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 15.70, #queue-req: 0
+[2026-07-13 08:34:22] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.86, #queue-req: 0
+[2026-07-13 08:34:23] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.88, #queue-req: 0
+[2026-07-13 08:34:24] Decode batch, #running-req: 1, #token: 896, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.13, #queue-req: 0
+[2026-07-13 08:34:25] Decode batch, #running-req: 1, #token: 896, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.98, #queue-req: 0
+[2026-07-13 08:34:26] Decode batch, #running-req: 1, #token: 896, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.53, #queue-req: 0
+[2026-07-13 08:34:27] Decode batch, #running-req: 1, #token: 1024, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.22, #queue-req: 0
+[2026-07-13 08:34:28] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.54, #queue-req: 0
+[2026-07-13 08:34:28] INFO:     127.0.0.1:41998 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:34:29] Prefill batch, #new-seq: 1, #new-token: 512, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 57.68
+[2026-07-13 08:34:30] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 18.22, #queue-req: 0
+[2026-07-13 08:34:31] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.72, #queue-req: 0
+[2026-07-13 08:34:32] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.72, #queue-req: 0
+[2026-07-13 08:34:33] Decode batch, #running-req: 1, #token: 640, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.43, #queue-req: 0
+[2026-07-13 08:34:34] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.55, #queue-req: 0
+[2026-07-13 08:34:35] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.49, #queue-req: 0
+[2026-07-13 08:34:35] Decode batch, #running-req: 1, #token: 768, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.62, #queue-req: 0
+[2026-07-13 08:34:36] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.68, #queue-req: 0
+[2026-07-13 08:34:36] INFO:     127.0.0.1:49698 - "POST /generate HTTP/1.1" 200 OK
+[2026-07-13 08:34:37] Prefill batch, #new-seq: 1, #new-token: 128, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, npu graph: False, input throughput (token/s): 16.23
+[2026-07-13 08:34:38] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, npu graph: True, gen throughput (token/s): 32.21, #queue-req: 0
+[2026-07-13 08:34:39] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 43.20, #queue-req: 0
+[2026-07-13 08:34:40] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.83, #queue-req: 0
+[2026-07-13 08:34:40] Decode batch, #running-req: 1, #token: 256, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.49, #queue-req: 0
+[2026-07-13 08:34:41] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.88, #queue-req: 0
+[2026-07-13 08:34:42] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.95, #queue-req: 0
+[2026-07-13 08:34:43] Decode batch, #running-req: 1, #token: 384, token usage: 0.00, npu graph: True, gen throughput (token/s): 42.32, #queue-req: 0
+[2026-07-13 08:34:44] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, npu graph: True, gen throughput (token/s): 41.67, #queue-req: 0
+[2026-07-13 08:34:44] INFO:     127.0.0.1:49710 - "GET /server_info HTTP/1.1" 200 OK
+[2026-07-13 08:34:44] INFO:     127.0.0.1:33162 - "GET /server_info HTTP/1.1" 200 OK
+[2026-07-13 08:34:48] SIGTERM received. signum=None frame=None. Draining requests and shutting down...
+[2026-07-13 08:34:49] Gracefully exiting... Remaining number of requests 0. Remaining requests remaining_rids=[].
+[2026-07-13 08:34:49] kill_process_tree called: parent_pid=2650791, include_parent=True, pid=2650791

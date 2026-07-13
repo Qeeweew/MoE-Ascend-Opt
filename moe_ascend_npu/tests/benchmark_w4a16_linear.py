@@ -13,7 +13,12 @@ Migrated from sgl-kernel-npu/tests/python/sgl_kernel_npu/benchmark_w4a16_linear.
 the only change is the custom kernel namespace (``npu`` -> ``moe_ascend_npu``).
 """
 
+import argparse
+import json
+import os
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 import torch
 import torch_npu
@@ -40,7 +45,7 @@ INTERMEDIATE_SIZE = 8192
 GROUP_SIZE = 32
 
 # Number of weight copies to avoid cache effects in graph mode
-NUM_WEIGHT_COPIES = 10
+NUM_WEIGHT_COPIES = 4
 WARMUP_ITERATIONS = 10
 BENCHMARK_ITERATIONS = 100
 
@@ -230,16 +235,16 @@ def bytes_weight_only(output_size, input_size, group_size=32):
 # ------------------------------------------------------------
 # Benchmark per batch size
 # ------------------------------------------------------------
-def benchmark_bs(batch_size, input_size, output_size, group_size=32):
+def benchmark_bs(batch_size, input_size, output_size, weight_bundle, group_size=32):
     """Benchmark npu_weight_quant_batchmatmul and batch_gemm_w4a16_small_bs vs torch.bmm.
 
     Each graph captures NUM_WEIGHT_COPIES kernel executions with different weights
     to simulate real forward pass memory traffic.
     """
 
-    # Create multiple weight copies
-    weight_packed_list, weight_scale_list, weight_offset_list, weight_bf16_T_list = \
-        create_multiple_quantized_weights(output_size, input_size, group_size, NUM_WEIGHT_COPIES)
+    # Reuse the same cold-weight pool across batch sizes. Recreating 8192x8192
+    # weights for every batch size measures Python setup rather than kernels.
+    weight_packed_list, weight_scale_list, weight_offset_list, weight_bf16_T_list = weight_bundle
 
     # Input tensor [batch_size, input_size]
     x = torch.randn((batch_size, input_size), device=device, dtype=dtype)
@@ -354,6 +359,11 @@ def benchmark_bs(batch_size, input_size, output_size, group_size=32):
 # Main
 # ------------------------------------------------------------
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 2, 3, 4])
+    parser.add_argument("--json-out", type=Path)
+    args = parser.parse_args()
+
     torch.manual_seed(0)
 
     print("=" * 100)
@@ -366,12 +376,14 @@ def main():
     print(f"  Quantization: int4 symmetric")
     print("=" * 100)
 
-    test_cases = [
-        ("Hidden->Intermediate (Gate/Up)", HIDDEN_SIZE, INTERMEDIATE_SIZE),
-        # ("Intermediate->Hidden (Down)", INTERMEDIATE_SIZE, HIDDEN_SIZE),
-    ]
+    test_cases = [("Generic 8192x8192 Linear", HIDDEN_SIZE, INTERMEDIATE_SIZE)]
 
+    all_results = []
     for case_name, input_size, output_size in test_cases:
+        print(f"Preparing {NUM_WEIGHT_COPIES} independent 8192x8192 weight copies...")
+        weight_bundle = create_multiple_quantized_weights(
+            output_size, input_size, GROUP_SIZE, NUM_WEIGHT_COPIES
+        )
         print(f"\n{case_name}: [{input_size}] -> [{output_size}]")
         print("-" * 120)
         print(f"{'BS':>3} | {'BMM(us)':>10} | {'NPU(us)':>10} | {'Custom(us)':>11} | "
@@ -379,8 +391,10 @@ def main():
               f"{'Custom(GB/s)':>12} | {'Custom(TF/s)':>12}")
         print("-" * 120)
 
-        for batch_size in range(1, 5):
-            r = benchmark_bs(batch_size, input_size, output_size, GROUP_SIZE)
+        for batch_size in args.batch_sizes:
+            r = benchmark_bs(batch_size, input_size, output_size, weight_bundle, GROUP_SIZE)
+            r["case"] = case_name
+            all_results.append(r)
             print(
                 f"{r['batch_size']:>3} | "
                 f"{r['bmm_us']:>10.2f} | "
@@ -393,6 +407,31 @@ def main():
             )
 
     print("\n" + "=" * 100)
+
+    if args.json_out:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "benchmark": "npu_w4a16_linear_8192",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "shape": {
+                "input_size": HIDDEN_SIZE,
+                "output_size": INTERMEDIATE_SIZE,
+                "group_size": GROUP_SIZE,
+            },
+            "environment": {
+                "ascend_rt_visible_devices": os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),
+                "torch_version": torch.__version__,
+                "torch_npu_version": torch_npu.__version__,
+            },
+            "settings": {
+                "num_weight_copies": NUM_WEIGHT_COPIES,
+                "warmup_iterations": WARMUP_ITERATIONS,
+                "benchmark_iterations": BENCHMARK_ITERATIONS,
+            },
+            "results": all_results,
+        }
+        args.json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        print(f"JSON result: {args.json_out}")
 
 
 if __name__ == "__main__":

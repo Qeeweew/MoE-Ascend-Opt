@@ -1,0 +1,90 @@
+{
+  "benchmark": "npu_fused_moe_w4a16",
+  "timestamp_utc": "2026-07-13T05:11:26.674605+00:00",
+  "model_shape": {
+    "source": "Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32",
+    "hidden_size": 2048,
+    "moe_intermediate_size": 768,
+    "num_experts": 128,
+    "top_k": 8,
+    "group_size": 32
+  },
+  "environment": {
+    "ascend_rt_visible_devices": "0",
+    "torch_version": "2.10.0+cpu",
+    "torch_npu_version": "2.10.0"
+  },
+  "settings": {
+    "routing_blocks_per_graph": 16,
+    "warmup_iterations": 10,
+    "benchmark_iterations": 100
+  },
+  "reference": "official npu_fused_experts W4A16 antiquant path",
+  "custom": "moe_ascend_npu.fused_moe_w4a16_small_bs",
+  "results": [
+    {
+      "B": 1,
+      "ref_us": 201.9255256652832,
+      "custom_us": 42.854647636413574,
+      "ref_GBs": 105.15591790607716,
+      "custom_GBs": 495.48100780457156,
+      "speedup": 4.711869932485623
+    },
+    {
+      "B": 2,
+      "ref_us": 269.4914436340332,
+      "custom_us": 60.39012432098389,
+      "ref_GBs": 157.58321461838403,
+      "custom_GBs": 703.2164360894317,
+      "speedup": 4.462508508868766
+    },
+    {
+      "B": 3,
+      "ref_us": 410.5238342285156,
+      "custom_us": 77.85717487335205,
+      "ref_GBs": 155.17002105300716,
+      "custom_GBs": 818.1775424502689,
+      "speedup": 5.2727810236667665
+    },
+    {
+      "B": 4,
+      "ref_us": 519.7357177734375,
+      "custom_us": 94.85872268676758,
+      "ref_GBs": 163.41893215240714,
+      "custom_GBs": 895.3805574682068,
+      "speedup": 5.479050350378992
+    },
+    {
+      "B": 5,
+      "ref_us": 617.0214080810547,
+      "custom_us": 111.98760986328125,
+      "ref_GBs": 172.065861264336,
+      "custom_GBs": 948.0363062450778,
+      "speedup": 5.50972923553184
+    },
+    {
+      "B": 6,
+      "ref_us": 726.1495971679688,
+      "custom_us": 137.42810249328613,
+      "ref_GBs": 175.44867407057188,
+      "custom_GBs": 927.0446268893514,
+      "speedup": 5.283850857239653
+    },
+    {
+      "B": 7,
+      "ref_us": 840.3337097167969,
+      "custom_us": 155.34497261047363,
+      "ref_GBs": 176.87693148724463,
+      "custom_GBs": 956.8101593651361,
+      "speedup": 5.4094683310024285
+    },
+    {
+      "B": 8,
+      "ref_us": 937.5180053710938,
+      "custom_us": 173.80191802978516,
+      "ref_GBs": 181.1904529052339,
+      "custom_GBs": 977.3730573611322,
+      "speedup": 5.394175254213406
+    }
+  ]
+}

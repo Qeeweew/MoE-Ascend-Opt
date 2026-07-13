@@ -1,0 +1,13 @@
+cpu_routes  median_ms  mean_ms
+         0      0.079    0.081
+         1      0.190    0.197
+         2      0.194    0.197
+         3      0.203    0.205
+         4      0.208    0.211
+         5      0.216    0.219
+         6      0.225    0.245
+         7      0.235    0.239
+         8      0.239    0.246
+
+TopK->7 drop: 1.63% (ideal one-route share: 12.50%)
+JSON result: docs/bench_results/raw/operators_qwen3/cpu_partial_moe_decode_q4_0_tp4.json

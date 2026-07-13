@@ -100,6 +100,38 @@ class ExpertCacheFusedMoEMethod(MoEOffloadInt4FusedMoEMethod):
         cpu_ids = torch.where(slot_ids >= 0, torch.full_like(topk_ids, -1), topk_ids)
 
         main_stream = torch_npu.npu.current_stream()
+        if get_is_capture_mode():
+            # Decode graph path: keep everything on one stream.  The first
+            # callback only dispatches CPU work to a dedicated coordinator and
+            # returns; the NPU cached kernel then runs while the CPU workers are
+            # active.  The second callback joins CPU completion, after which the
+            # pre-enqueued H2D copy publishes cpu_out.
+            _get_or_create_global_callback_manager(int(main_stream.npu_stream))
+            num_tokens, top_k = int(x.shape[0]), int(topk_ids.shape[1])
+            dtype_int = 1 if x.dtype == torch.bfloat16 else 0
+            key = (num_tokens, top_k, dtype_int)
+            ctx = self.graph_contexts.get(key)
+            if ctx is None:
+                ctx = torch.classes.nanovllm.MoEGraphContext(
+                    self.moe_infer_handle, num_tokens, top_k, dtype_int
+                )
+                self.graph_contexts[key] = ctx
+            cpu_out = torch.empty_like(x)
+            torch.ops.nanovllm.moe_forward_npu_graph_partial_start(
+                x, cpu_ids, topk_ids, topk_weights,
+                self.moe_infer_handle, ctx,
+            )
+            npu_out = torch.ops.moe_ascend_npu.fused_moe_w4a16_cached(
+                x,
+                self.cache_manager.w13_cache, self.cache_manager.s13_cache,
+                self.cache_manager.w2_cache, self.cache_manager.s2_cache,
+                slot_ids, topk_weights,
+            )
+            torch.ops.nanovllm.moe_forward_npu_graph_partial_wait_out(cpu_out, ctx)
+            return StandardCombineInput(
+                hidden_states=torch.add(npu_out, cpu_out)
+            )
+
         if self.cpu_stream is None:
             # Defensive eager-only fallback for unusual loaders that skip
             # process_weights_after_loading.
@@ -111,25 +143,9 @@ class ExpertCacheFusedMoEMethod(MoEOffloadInt4FusedMoEMethod):
         self.input_ready.record(main_stream)
         with torch_npu.npu.stream(self.cpu_stream):
             self.cpu_stream.wait_event(self.input_ready)
-            if not get_is_capture_mode():
-                cpu_out = torch.ops.nanovllm.moe_forward_npu_stream_partial(
-                    x, cpu_ids, topk_ids, topk_weights, self.moe_infer_handle
-                )
-            else:
-                num_tokens, top_k = int(x.shape[0]), int(topk_ids.shape[1])
-                dtype_int = 1 if x.dtype == torch.bfloat16 else 0
-                key = (num_tokens, top_k, dtype_int)
-                ctx = self.graph_contexts.get(key)
-                if ctx is None:
-                    ctx = torch.classes.nanovllm.MoEGraphContext(
-                        self.moe_infer_handle, num_tokens, top_k, dtype_int
-                    )
-                    self.graph_contexts[key] = ctx
-                cpu_out = torch.empty_like(x)
-                torch.ops.nanovllm.moe_forward_npu_graph_partial_out(
-                    x, cpu_ids, topk_ids, topk_weights,
-                    self.moe_infer_handle, ctx, cpu_out,
-                )
+            cpu_out = torch.ops.nanovllm.moe_forward_npu_stream_partial(
+                x, cpu_ids, topk_ids, topk_weights, self.moe_infer_handle
+            )
             self.cpu_done.record(self.cpu_stream)
 
         # The NPU hot path is intentionally submitted after the CPU fork and

@@ -1,0 +1,68 @@
+{
+  "benchmark": "cpu_partial_moe_decode_q4_0",
+  "timestamp_utc": "2026-07-13T05:22:12.497030+00:00",
+  "model_shape": {
+    "source": "Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32",
+    "hidden_size": 2048,
+    "moe_intermediate_size": 768,
+    "top_k": 8
+  },
+  "environment": {
+    "nanovllm_tp_size": "8",
+    "nanovllm_tp_threads_per_node": "20",
+    "omp_num_threads": "20",
+    "torch_version": "2.10.0+cpu"
+  },
+  "settings": {
+    "warmup": 20,
+    "runs": 200
+  },
+  "topk_minus_one_drop_percent": 1.3604305864884834,
+  "results": [
+    {
+      "cpu_routes": 0,
+      "median_ms": 0.09303,
+      "mean_ms": 0.09326405
+    },
+    {
+      "cpu_routes": 1,
+      "median_ms": 0.25259,
+      "mean_ms": 0.25908595
+    },
+    {
+      "cpu_routes": 2,
+      "median_ms": 0.25786,
+      "mean_ms": 0.2684182
+    },
+    {
+      "cpu_routes": 3,
+      "median_ms": 0.25576,
+      "mean_ms": 0.26023095
+    },
+    {
+      "cpu_routes": 4,
+      "median_ms": 0.25966,
+      "mean_ms": 0.2620335
+    },
+    {
+      "cpu_routes": 5,
+      "median_ms": 0.263135,
+      "mean_ms": 0.2720818
+    },
+    {
+      "cpu_routes": 6,
+      "median_ms": 0.265905,
+      "mean_ms": 0.27307965
+    },
+    {
+      "cpu_routes": 7,
+      "median_ms": 0.265735,
+      "mean_ms": 0.2715723
+    },
+    {
+      "cpu_routes": 8,
+      "median_ms": 0.2694,
+      "mean_ms": 0.2785533
+    }
+  ]
+}

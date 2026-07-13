@@ -13,6 +13,7 @@ setup(
                 "moe_infer.cpp",
                 "nanovllm_ops.cpp",
                 "moe_common.cpp",
+                "moe_decode_gemv.cpp",
                 "gemm_kernels.cpp"
             ],
             define_macros=[("WITH_NPU", None)],

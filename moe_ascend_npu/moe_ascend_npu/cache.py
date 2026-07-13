@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import os
 import threading
+import time
+from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+import numpy as np
 import torch
 
 try:
@@ -20,9 +26,9 @@ except ImportError:  # CPU-only policy tests do not require SGLang.
 
 @dataclass(frozen=True)
 class ExpertCacheConfig:
-    # Cache a small hot working set across all layers.  K=256 is the measured
-    # default for Qwen3-30B-A3B: it keeps only 4.17% of expert instances while
-    # producing a stable end-to-end gain on the decode workload.
+    # Cache a small hot working set across all layers.  K=256 keeps 4.17% of
+    # Qwen3 expert instances and is the current experimental default; matched
+    # ShareGPT tests show that this capacity does not yet beat CPU-only Q4.
     size: int = 256
     swap_per_update: int = 8
     update_interval: int = 16
@@ -82,6 +88,14 @@ class ExpertCacheManager:
         self._stable_no_swap_windows = 0
         self._last_window_hit_rate = 0.0
         self._lock = threading.RLock()
+        self._trace_path = os.environ.get("MOE_EXPERT_CACHE_TRACE_PATH")
+        self._control_us = deque(maxlen=2048)
+        self._collect_us = deque(maxlen=2048)
+        self._rebalance_us = deque(maxlen=2048)
+        self._export_us = deque(maxlen=2048)
+        self._staging_wait_us = deque(maxlen=2048)
+        self._copy_submit_us = deque(maxlen=2048)
+        self._pending_trace_record: Optional[dict] = None
 
     @property
     def enabled(self) -> bool:
@@ -215,12 +229,36 @@ class ExpertCacheManager:
             # is intended to save.  Cache copies/table publication below are
             # enqueued on the main stream before the next replay and therefore
             # remain stream ordered.
+            control_begin = time.perf_counter_ns()
+            collect_begin = time.perf_counter_ns()
             hit_rate = self._collect_stats()
+            self._collect_us.append((time.perf_counter_ns() - collect_begin) / 1e3)
+            export_before = len(self._export_us)
+            wait_before = len(self._staging_wait_us)
+            copy_before = len(self._copy_submit_us)
+            rebalance_begin = time.perf_counter_ns()
             swaps = self._rebalance()
+            self._rebalance_us.append((time.perf_counter_ns() - rebalance_begin) / 1e3)
             self._update_interval_backoff(hit_rate, swaps)
+            self._control_us.append((time.perf_counter_ns() - control_begin) / 1e3)
+            if self._pending_trace_record is not None:
+                self._pending_trace_record.update({
+                    "swaps": swaps,
+                    "control_us": self._control_us[-1],
+                    "collect_us": self._collect_us[-1],
+                    "rebalance_us": self._rebalance_us[-1],
+                    "replacement_timing_us": {
+                        "exports": list(self._export_us)[export_before:],
+                        "staging_waits": list(self._staging_wait_us)[wait_before:],
+                        "copy_submits": list(self._copy_submit_us)[copy_before:],
+                    },
+                })
+                self._append_trace(self._pending_trace_record)
+                self._pending_trace_record = None
 
     def _collect_stats(self) -> float:
         window_total = window_miss = 0
+        trace_layers = []
         for layer_idx, source in self.sources.items():
             stats = source.handle.take_routing_stats()
             values = stats.tolist()
@@ -228,6 +266,14 @@ class ExpertCacheManager:
             self.freq[layer_idx].mul_(self.config.decay).add_(counts)
             window_total += int(values[-3])
             window_miss += int(values[-2])
+            if self._trace_path:
+                trace_layers.append({
+                    "layer": layer_idx,
+                    "counts": values[:-3],
+                    "routes": int(values[-3]),
+                    "misses": int(values[-2]),
+                    "calls": int(values[-1]),
+                })
         self.total_routes += window_total
         self.total_misses += window_miss
         hit_rate = 0.0 if window_total == 0 else 1.0 - window_miss / window_total
@@ -235,7 +281,24 @@ class ExpertCacheManager:
             "[ExpertCache] step=%d active=%d window_hit=%.2f%% swaps=%d",
             self.replay_steps, len(self.owner_slot), hit_rate * 100, self.total_swaps,
         )
+        if self._trace_path:
+            self._pending_trace_record = {
+                "schema": "moe_route_window_v1",
+                "time_ns": time.time_ns(),
+                "step": self.replay_steps,
+                "window_routes": window_total,
+                "window_misses": window_miss,
+                "window_hit_rate": hit_rate,
+                "active_slots": len(self.owner_slot),
+                "layers": trace_layers,
+            }
         return hit_rate
+
+    def _append_trace(self, record: dict) -> None:
+        path = Path(self._trace_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, separators=(",", ":")) + "\n")
 
     def _rebalance(self) -> int:
         for owner in list(self.cooldown):
@@ -243,13 +306,13 @@ class ExpertCacheManager:
             if self.cooldown[owner] <= 0:
                 del self.cooldown[owner]
 
-        candidates = sorted(
-            ((float(scores[e]), (layer, e))
-             for layer, scores in self.freq.items()
-             for e in range(scores.numel())
-             if (layer, e) not in self.owner_slot and scores[e] > 0),
-            reverse=True,
-        )
+        # Do not index CPU torch tensors one scalar at a time here.  The old
+        # loop performed more than 12k Python->PyTorch dispatches for Qwen3's
+        # 48x128 expert instances and cost ~123 ms per update.  NumPy views are
+        # zero-copy and make scalar filtering a normal CPU operation.
+        score_views = {
+            layer: scores.numpy() for layer, scores in self.freq.items()
+        }
         swaps = 0
         # A large configured batch is useful for bootstrapping an empty cache,
         # but allowing the same volume after it is full causes route-window
@@ -264,14 +327,38 @@ class ExpertCacheManager:
             )
         else:
             swap_limit = min(self.config.swap_per_update, 8)
-        for score, owner in candidates:
+
+        layers = sorted(score_views)
+        experts_per_layer = score_views[layers[0]].size
+        if any(score_views[layer].size != experts_per_layer for layer in layers):
+            raise RuntimeError("expert cache frequency tensors have inconsistent sizes")
+        layer_position = {layer: pos for pos, layer in enumerate(layers)}
+        candidate_scores = np.concatenate(
+            [score_views[layer] for layer in layers]
+        ).copy()
+        for layer, expert_idx in self.owner_slot:
+            candidate_scores[
+                layer_position[layer] * experts_per_layer + expert_idx
+            ] = -np.inf
+        flat_indices = np.arange(candidate_scores.size, dtype=np.int64)
+        # Match the old ``sorted((score, (layer, expert)), reverse=True)`` tie
+        # break exactly: score descending, then layer/expert (flat id)
+        # descending.  This keeps policy semantics unchanged.
+        candidate_order = np.lexsort((-flat_indices, -candidate_scores))
+
+        for flat_idx in candidate_order:
             if swaps >= swap_limit:
                 break
+            score = float(candidate_scores[flat_idx])
+            if not np.isfinite(score) or score <= 0:
+                break
+            layer_pos, expert_idx = divmod(int(flat_idx), experts_per_layer)
+            owner = (layers[layer_pos], expert_idx)
             if len(self.owner_slot) < self.config.size:
                 slot = self._find_spare_slot()
                 victim = None
             else:
-                victim_score, victim = self._coldest_owner()
+                victim_score, victim = self._coldest_owner(score_views)
                 if victim is None or owner in self.cooldown:
                     break
                 if score <= victim_score * 1.10:
@@ -328,12 +415,16 @@ class ExpertCacheManager:
                 return slot
         raise RuntimeError("expert cache has no spare slot")
 
-    def _coldest_owner(self):
+    def _coldest_owner(self, score_views=None):
         eligible = [o for o in self.owner_slot if o not in self.cooldown]
         if not eligible:
             return 0.0, None
-        victim = min(eligible, key=lambda o: float(self.freq[o[0]][o[1]]))
-        return float(self.freq[victim[0]][victim[1]]), victim
+        if score_views is None:
+            score_views = {
+                layer: scores.numpy() for layer, scores in self.freq.items()
+            }
+        victim = min(eligible, key=lambda o: float(score_views[o[0]][o[1]]))
+        return float(score_views[victim[0]][victim[1]]), victim
 
     def _load_owner_into_slot(self, owner: Tuple[int, int], slot: int) -> None:
         layer_idx, expert_idx = owner
@@ -342,12 +433,15 @@ class ExpertCacheManager:
         self._staging_cursor = (self._staging_cursor + 1) % len(self._staging_buffers)
         prior_copy = self._staging_events[staging_idx]
         if prior_copy is not None:
-            # Normally already complete because updates are separated by many
-            # graph replays; this is the correctness guard for aggressive
-            # configurations that cycle the staging ring sooner.
+            wait_begin = time.perf_counter_ns()
             prior_copy.synchronize()
+            self._staging_wait_us.append((time.perf_counter_ns() - wait_begin) / 1e3)
         w13, s13, w2, s2 = self._staging_buffers[staging_idx]
+
+        export_begin = time.perf_counter_ns()
         src.handle.export_expert_npu_layout_out(expert_idx, w13, s13, w2, s2)
+        self._export_us.append((time.perf_counter_ns() - export_begin) / 1e3)
+        copy_begin = time.perf_counter_ns()
         self.w13_cache[slot].copy_(w13, non_blocking=True)
         self.s13_cache[slot].copy_(s13, non_blocking=True)
         self.w2_cache[slot].copy_(w2, non_blocking=True)
@@ -355,6 +449,20 @@ class ExpertCacheManager:
         event = torch.npu.Event()
         event.record(torch.npu.current_stream())
         self._staging_events[staging_idx] = event
+        self._copy_submit_us.append((time.perf_counter_ns() - copy_begin) / 1e3)
+
+    @staticmethod
+    def _timing_summary(values) -> dict:
+        if not values:
+            return {"samples": 0, "median_us": None, "p95_us": None, "max_us": None}
+        ordered = sorted(values)
+        p95_idx = min(len(ordered) - 1, int(0.95 * len(ordered)))
+        return {
+            "samples": len(ordered),
+            "median_us": ordered[len(ordered) // 2],
+            "p95_us": ordered[p95_idx],
+            "max_us": ordered[-1],
+        }
 
     def metrics(self) -> dict:
         hit_rate = 0.0 if self.total_routes == 0 else 1.0 - self.total_misses / self.total_routes
@@ -364,6 +472,14 @@ class ExpertCacheManager:
             "swaps": self.total_swaps,
             "routes": self.total_routes,
             "hit_rate": hit_rate,
+            "timing": {
+                "control": self._timing_summary(self._control_us),
+                "collect": self._timing_summary(self._collect_us),
+                "rebalance": self._timing_summary(self._rebalance_us),
+                "expert_export": self._timing_summary(self._export_us),
+                "staging_wait": self._timing_summary(self._staging_wait_us),
+                "h2d_submit": self._timing_summary(self._copy_submit_us),
+            },
         }
 
 

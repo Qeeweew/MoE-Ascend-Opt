@@ -1,0 +1,34 @@
+================================================================================
+MoE CPU fused performance test (nanovllm_ext) - weight bandwidth only
+================================================================================
+OMP_NUM_THREADS: 20
+torch.get_num_threads(): 20
+Params: H=2048, I=768, E=128, K=8
+Weight sets: 4, benchmark runs=50
+
+Initializing handles & loading dummy quantized weights (row-major -> repack in C++) ...
+Setup finished.
+
+--- Performance Results (using get_last_run_time_ms()) ---
+Num Tokens   ActiveE  Avg Time (ms)    Weight BW (GB/s)   Compute (GFLOPS)  
+----------------------------------------------------------------------------
+1            8        0.2086           192.23             361.85            
+2            16       0.4561           175.87             331.06            
+3            24       0.5501           218.73             411.73            
+4            32       0.6655           241.08             453.80            
+5            40       0.7085           283.05             532.81            
+6            48       0.7807           308.26             580.25            
+7            56       0.8828           318.02             598.62            
+8            64       1.0067           318.73             599.96            
+16           128      1.6911           379.48             714.31            
+32           128      1.8628           344.50             1296.93           
+64           128      2.0974           305.97             2303.76           
+128          128      2.8165           227.85             3431.11           
+256          128      4.5735           140.31             4225.91           
+512          128      8.5083           75.42              4543.18           
+1024         128      14.3014          44.87              5405.71           
+2048         128      27.7458          23.13              5572.70           
+4096         128      54.6178          11.75              5661.84           
+----------------------------------------------------------------------------
+Test complete.
+JSON result: /home/xwj/workspace/MoE-Ascend-Opt/docs/bench_results/raw/operators_qwen3/cpu_fused_moe_q8_0_tp8.json

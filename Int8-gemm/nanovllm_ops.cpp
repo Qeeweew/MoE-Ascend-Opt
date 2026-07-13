@@ -6,8 +6,11 @@
 #include "quant_traits.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <sstream>
 
@@ -140,8 +143,7 @@ struct MoECpuTaskArgs {
 };
 
 // Direct callback - calls execute_fn directly, no intermediate function
-static void moe_compute_callback(void* user_data) {
-    auto* args = reinterpret_cast<MoECpuTaskArgs*>(user_data);
+static void run_moe_compute(MoECpuTaskArgs* args) {
     if (args->record_routing && args->moe_impl != nullptr && args->routing_ids_ptr != nullptr) {
         args->moe_impl->record_routing(
             args->routing_ids_ptr, args->topk_ids_ptr,
@@ -165,9 +167,91 @@ static void moe_compute_callback(void* user_data) {
     );
 }
 
+static void moe_compute_callback(void* user_data) {
+    run_moe_compute(reinterpret_cast<MoECpuTaskArgs*>(user_data));
+}
+
+struct MoEAsyncState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool in_flight = false;
+    bool done = false;
+    bool failed = false;
+};
+
+struct MoEAsyncJob {
+    MoECpuTaskArgs* args = nullptr;
+    MoEAsyncState* state = nullptr;
+};
+
+// A coordinator thread is deliberately separate from the NUMA GEMV worker
+// pools.  execute_fn submits work to those pools and waits for completion, so
+// running the coordinator inside one of them can deadlock when all workers are
+// occupied by the MoE kernels themselves.
+class MoEAsyncExecutor {
+public:
+    static MoEAsyncExecutor& instance() {
+        static MoEAsyncExecutor executor;
+        return executor;
+    }
+
+    void submit(MoEAsyncJob job) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            jobs_.push_back(job);
+        }
+        cv_.notify_one();
+    }
+
+private:
+    MoEAsyncExecutor() : worker_(&MoEAsyncExecutor::worker_loop, this) {}
+
+    ~MoEAsyncExecutor() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_one();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    void worker_loop() {
+        for (;;) {
+            MoEAsyncJob job;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [&] { return stop_ || !jobs_.empty(); });
+                if (stop_ && jobs_.empty()) return;
+                job = jobs_.front();
+                jobs_.pop_front();
+            }
+
+            bool failed = false;
+            try {
+                run_moe_compute(job.args);
+            } catch (...) {
+                failed = true;
+            }
+            {
+                std::lock_guard<std::mutex> lock(job.state->mutex);
+                job.state->failed = failed;
+                job.state->done = true;
+            }
+            job.state->cv.notify_one();
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<MoEAsyncJob> jobs_;
+    bool stop_ = false;
+    std::thread worker_;
+};
+
 struct MoEGraphContext : torch::CustomClassHolder {
     PinnedBuffer hidden_in, hidden_out, topk_ids, routing_ids, topk_w;
     MoECpuTaskArgs args;
+    MoEAsyncState async_state;
 
     MoEGraphContext(const c10::intrusive_ptr<MoEInferHandle>& moe_h,
                     int64_t num_tokens,
@@ -210,6 +294,30 @@ struct MoEGraphContext : torch::CustomClassHolder {
         args.down_proj_d_tp = moe_h->impl->down_proj_d_tp_data();
     }
 };
+
+static void moe_async_start_callback(void* user_data) {
+    auto* ctx = reinterpret_cast<MoEGraphContext*>(user_data);
+    {
+        std::lock_guard<std::mutex> lock(ctx->async_state.mutex);
+        if (ctx->async_state.in_flight && !ctx->async_state.done) {
+            std::terminate();
+        }
+        ctx->async_state.in_flight = true;
+        ctx->async_state.done = false;
+        ctx->async_state.failed = false;
+    }
+    MoEAsyncExecutor::instance().submit({&ctx->args, &ctx->async_state});
+}
+
+static void moe_async_join_callback(void* user_data) {
+    auto* ctx = reinterpret_cast<MoEGraphContext*>(user_data);
+    std::unique_lock<std::mutex> lock(ctx->async_state.mutex);
+    ctx->async_state.cv.wait(lock, [&] { return ctx->async_state.done; });
+    if (ctx->async_state.failed) {
+        std::terminate();
+    }
+    ctx->async_state.in_flight = false;
+}
 
 struct StreamCallData {
     int device_id = 0;
@@ -441,6 +549,59 @@ static void moe_forward_npu_graph_partial_out(
     TORCH_CHECK(aclrtMemcpyAsync(out_npu.data_ptr(), hb, ctx->hidden_out.ptr, ctx->hidden_out.size,
                                 ACL_MEMCPY_HOST_TO_DEVICE, stream) == ACL_SUCCESS);
 }
+
+// Single-stream split callback path used by expert caching:
+//   D2H -> async-start callback -> NPU cached MoE -> join callback -> H2D.
+// The start callback only queues CPU work onto MoEAsyncExecutor and returns,
+// allowing the same stream to proceed into the NPU kernel without a side
+// stream or cross-stream events.
+static void moe_forward_npu_graph_partial_start(
+    const torch::Tensor& hidden_npu,
+    const torch::Tensor& compute_ids_npu,
+    const torch::Tensor& routing_ids_npu,
+    const torch::Tensor& topk_w_npu,
+    const c10::intrusive_ptr<MoEInferHandle>& moe_h,
+    const c10::intrusive_ptr<MoEGraphContext>& ctx)
+{
+    (void)moe_h;
+    TORCH_CHECK(compute_ids_npu.sizes() == routing_ids_npu.sizes(),
+                "compute_ids and routing_ids shape mismatch");
+    aclrtStream stream = current_acl_stream(hidden_npu.get_device());
+    const size_t hb = hidden_npu.nbytes();
+    const size_t ib = compute_ids_npu.nbytes();
+    const size_t wb = topk_w_npu.nbytes();
+    ctx->args.record_routing = true;
+
+    TORCH_CHECK(aclrtMemcpyAsync(ctx->hidden_in.ptr, ctx->hidden_in.size,
+                                hidden_npu.data_ptr(), hb,
+                                ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(ctx->topk_ids.ptr, ctx->topk_ids.size,
+                                compute_ids_npu.data_ptr(), ib,
+                                ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(ctx->routing_ids.ptr, ctx->routing_ids.size,
+                                routing_ids_npu.data_ptr(), ib,
+                                ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(ctx->topk_w.ptr, ctx->topk_w.size,
+                                topk_w_npu.data_ptr(), wb,
+                                ACL_MEMCPY_DEVICE_TO_HOST, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtLaunchCallback(moe_async_start_callback, ctx.get(),
+                                   ACL_CALLBACK_BLOCK, stream) == ACL_SUCCESS);
+}
+
+static void moe_forward_npu_graph_partial_wait_out(
+    torch::Tensor& out_npu,
+    const c10::intrusive_ptr<MoEGraphContext>& ctx)
+{
+    aclrtStream stream = current_acl_stream(out_npu.get_device());
+    const size_t hb = out_npu.nbytes();
+    TORCH_CHECK(hb == ctx->hidden_out.size,
+                "output size does not match MoEGraphContext");
+    TORCH_CHECK(aclrtLaunchCallback(moe_async_join_callback, ctx.get(),
+                                   ACL_CALLBACK_BLOCK, stream) == ACL_SUCCESS);
+    TORCH_CHECK(aclrtMemcpyAsync(out_npu.data_ptr(), hb,
+                                ctx->hidden_out.ptr, ctx->hidden_out.size,
+                                ACL_MEMCPY_HOST_TO_DEVICE, stream) == ACL_SUCCESS);
+}
 #endif
 
 // ============================================================
@@ -529,6 +690,8 @@ TORCH_LIBRARY_FRAGMENT(nanovllm, m) {
     m.def("moe_forward_npu_stream_partial(Tensor hidden, Tensor compute_ids, Tensor routing_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe) -> Tensor");
     m.def("moe_forward_npu_graph_out(Tensor hidden, Tensor topk_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe, __torch__.torch.classes.nanovllm.MoEGraphContext ctx, Tensor(a!) out) -> ()");
     m.def("moe_forward_npu_graph_partial_out(Tensor hidden, Tensor compute_ids, Tensor routing_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe, __torch__.torch.classes.nanovllm.MoEGraphContext ctx, Tensor(a!) out) -> ()");
+    m.def("moe_forward_npu_graph_partial_start(Tensor hidden, Tensor compute_ids, Tensor routing_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe, __torch__.torch.classes.nanovllm.MoEGraphContext ctx) -> ()");
+    m.def("moe_forward_npu_graph_partial_wait_out(Tensor(a!) out, __torch__.torch.classes.nanovllm.MoEGraphContext ctx) -> ()");
 #endif
 }
 
@@ -558,6 +721,21 @@ TORCH_LIBRARY_IMPL(nanovllm, PrivateUse1, m) {
               const c10::intrusive_ptr<MoEGraphContext>& ctx,
               torch::Tensor out) {
                moe_forward_npu_graph_partial_out(hidden, compute_ids, routing_ids, w, moe, ctx, out);
+           });
+    m.impl("moe_forward_npu_graph_partial_start",
+           [](const torch::Tensor& hidden,
+              const torch::Tensor& compute_ids,
+              const torch::Tensor& routing_ids,
+              const torch::Tensor& w,
+              const c10::intrusive_ptr<MoEInferHandle>& moe,
+              const c10::intrusive_ptr<MoEGraphContext>& ctx) {
+               moe_forward_npu_graph_partial_start(
+                   hidden, compute_ids, routing_ids, w, moe, ctx);
+           });
+    m.impl("moe_forward_npu_graph_partial_wait_out",
+           [](torch::Tensor out,
+              const c10::intrusive_ptr<MoEGraphContext>& ctx) {
+               moe_forward_npu_graph_partial_wait_out(out, ctx);
            });
 }
 #endif

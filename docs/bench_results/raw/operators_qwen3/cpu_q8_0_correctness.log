@@ -1,0 +1,23 @@
+[quantize] done in 0.446s
+
+=== Test T=1 ===
+[time] ext=15.61 ms, ref=22.65 ms
+[err ] abs_max=0.001488, abs_mean=0.000320, rmse=0.000399, rel_rmse=0.014059
+
+=== Test T=8 ===
+[time] ext=2.79 ms, ref=58.93 ms
+[err ] abs_max=0.002182, abs_mean=0.000374, rmse=0.000473, rel_rmse=0.014668
+
+=== Test T=32 ===
+[time] ext=5.75 ms, ref=163.31 ms
+[err ] abs_max=0.002136, abs_mean=0.000369, rmse=0.000463, rel_rmse=0.014569
+
+=== Test T=128 ===
+[time] ext=11.44 ms, ref=429.23 ms
+[err ] abs_max=0.002869, abs_mean=0.000373, rmse=0.000470, rel_rmse=0.014671
+
+=== Test T=256 ===
+[time] ext=13.63 ms, ref=619.42 ms
+[err ] abs_max=0.002625, abs_mean=0.000370, rmse=0.000466, rel_rmse=0.014621
+
+All tests finished.

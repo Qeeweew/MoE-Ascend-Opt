@@ -11,8 +11,13 @@ Migrated from sgl-kernel-npu/tests/python/sgl_kernel_npu/benchmark_fused_moe.py;
 the only change is the custom kernel namespace (``npu`` -> ``moe_ascend_npu``).
 """
 
+import argparse
+import json
 import math
+import os
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 import torch
 import torch_npu
@@ -272,6 +277,7 @@ def benchmark_bs(B, w13, w13_scale, w13_offset, w2, w2_scale, w2_offset):
         "custom_us": t_custom_ms * 1e3 / ROUTING_BLOCKS,
         "ref_GBs": bytes_total / (t_ref_ms * 1e-3) / 1e9,
         "custom_GBs": bytes_total / (t_custom_ms * 1e-3) / 1e9,
+        "speedup": t_ref_ms / t_custom_ms,
     }
 
 
@@ -279,6 +285,11 @@ def benchmark_bs(B, w13, w13_scale, w13_offset, w2, w2_scale, w2_offset):
 # Main
 # ------------------------------------------------------------
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch-sizes", type=int, nargs="+", default=list(range(1, 9)))
+    parser.add_argument("--json-out", type=Path)
+    args = parser.parse_args()
+
     torch.manual_seed(0)
 
     raw_w13 = torch.randint(
@@ -303,15 +314,47 @@ def main():
     )
     w2_offset = torch.zeros_like(w2_scale)
 
-    print("BS | Ref(us) | Custom(us) | Ref GB/s | Custom GB/s")
-    print("-" * 56)
+    print("BS | Ref(us) | Custom(us) | Ref GB/s | Custom GB/s | Speedup")
+    print("-" * 68)
 
-    for B in [1, 2, 3, 4, 5, 6, 7, 8]:
+    results = []
+    for B in args.batch_sizes:
         r = benchmark_bs(B, w13, w13_scale, w13_offset, w2, w2_scale, w2_offset)
+        results.append(r)
         print(
             f"{B:>2} | {r['ref_us']:>7.2f} | {r['custom_us']:>10.2f} | "
-            f"{r['ref_GBs']:>8.2f} | {r['custom_GBs']:>10.2f}"
+            f"{r['ref_GBs']:>8.2f} | {r['custom_GBs']:>10.2f} | {r['speedup']:>7.2f}x"
         )
+
+    if args.json_out:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "benchmark": "npu_fused_moe_w4a16",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "model_shape": {
+                "source": "Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32",
+                "hidden_size": HIDDEN_SIZE,
+                "moe_intermediate_size": INTER_SIZE,
+                "num_experts": NUM_EXPERTS,
+                "top_k": TOP_K,
+                "group_size": GROUP_SIZE,
+            },
+            "environment": {
+                "ascend_rt_visible_devices": os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),
+                "torch_version": torch.__version__,
+                "torch_npu_version": torch_npu.__version__,
+            },
+            "settings": {
+                "routing_blocks_per_graph": ROUTING_BLOCKS,
+                "warmup_iterations": WARMUP_ITERATIONS,
+                "benchmark_iterations": BENCHMARK_ITERATIONS,
+            },
+            "reference": "official npu_fused_experts W4A16 antiquant path",
+            "custom": "moe_ascend_npu.fused_moe_w4a16_small_bs",
+            "results": results,
+        }
+        args.json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        print(f"JSON result: {args.json_out}")
 
 
 if __name__ == "__main__":

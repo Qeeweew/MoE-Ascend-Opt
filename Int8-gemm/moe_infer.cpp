@@ -352,18 +352,14 @@ void MoEInfer::store_quantized_weights_repack(
 
 namespace {
 
-template <int Shift>
-static inline uint32_t gather_signed_nibbles(uint32x4_t lo, uint32x4_t hi) {
-    const uint32x4_t mask = vdupq_n_u32(0xFU);
-    // uint4b8 -> signed int4 is subtraction by eight modulo 16, i.e. xor 8.
-    lo = veorq_u32(vandq_u32(vshrq_n_u32(lo, Shift), mask), vdupq_n_u32(8U));
-    hi = veorq_u32(vandq_u32(vshrq_n_u32(hi, Shift), mask), vdupq_n_u32(8U));
-    alignas(16) uint32_t lanes[8];
-    vst1q_u32(lanes, lo);
-    vst1q_u32(lanes + 4, hi);
-    return lanes[0] | (lanes[1] << 4) | (lanes[2] << 8) | (lanes[3] << 12)
-         | (lanes[4] << 16) | (lanes[5] << 20) | (lanes[6] << 24)
-         | (lanes[7] << 28);
+static inline uint32_t pack_eight_nibbles(uint8x8_t values) {
+    // vuzp with the same vector puts even elements in val[0] and odd elements
+    // in val[1].  The low four bytes therefore pack all eight nibbles without
+    // spilling vector lanes to the stack.
+    const uint8x8x2_t separated = vuzp_u8(values, values);
+    const uint8x8_t packed = vorr_u8(
+        separated.val[0], vshl_n_u8(separated.val[1], 4));
+    return vget_lane_u32(vreinterpret_u32_u8(packed), 0);
 }
 
 // In repack_B_q4_0 a source word's nibble order becomes
@@ -371,16 +367,25 @@ static inline uint32_t gather_signed_nibbles(uint32x4_t lo, uint32x4_t hi) {
 // transposes an 8x8 nibble tile, and converts uint4b8 to signed int4.
 static inline void cpu_tile_to_npu_rows(const uint32_t* src, uint32_t* dst,
                                         int64_t dst_row_stride) {
-    const uint32x4_t lo = vld1q_u32(src);
-    const uint32x4_t hi = vld1q_u32(src + 4);
-    dst[0 * dst_row_stride] = gather_signed_nibbles<0>(lo, hi);
-    dst[1 * dst_row_stride] = gather_signed_nibbles<8>(lo, hi);
-    dst[2 * dst_row_stride] = gather_signed_nibbles<16>(lo, hi);
-    dst[3 * dst_row_stride] = gather_signed_nibbles<24>(lo, hi);
-    dst[4 * dst_row_stride] = gather_signed_nibbles<4>(lo, hi);
-    dst[5 * dst_row_stride] = gather_signed_nibbles<12>(lo, hi);
-    dst[6 * dst_row_stride] = gather_signed_nibbles<20>(lo, hi);
-    dst[7 * dst_row_stride] = gather_signed_nibbles<28>(lo, hi);
+    const auto* bytes = reinterpret_cast<const uint8_t*>(src);
+    const uint8x16x2_t table = {vld1q_u8(bytes), vld1q_u8(bytes + 16)};
+    // Byte b of each uint32 word contains nibble rows b and b+4.  TBL gathers
+    // that byte from all eight source columns in one instruction.
+    alignas(16) static constexpr uint8_t base_indices[16] = {
+        0, 4, 8, 12, 16, 20, 24, 28, 0, 0, 0, 0, 0, 0, 0, 0,
+    };
+    const uint8x16_t base = vld1q_u8(base_indices);
+    const uint8x8_t sign_flip = vdup_n_u8(8);
+    const uint8x8_t nibble_mask = vdup_n_u8(0xF);
+    for (int byte = 0; byte < 4; ++byte) {
+        const uint8x16_t indices = vaddq_u8(base, vdupq_n_u8((uint8_t)byte));
+        const uint8x8_t gathered = vget_low_u8(vqtbl2q_u8(table, indices));
+        // uint4b8 -> signed int4 is subtraction by eight modulo 16, i.e. xor 8.
+        const uint8x8_t low = veor_u8(vand_u8(gathered, nibble_mask), sign_flip);
+        const uint8x8_t high = veor_u8(vshr_n_u8(gathered, 4), sign_flip);
+        dst[byte * dst_row_stride] = pack_eight_nibbles(low);
+        dst[(4 + byte) * dst_row_stride] = pack_eight_nibbles(high);
+    }
 }
 
 static void export_cpu_matrix_group_to_npu(

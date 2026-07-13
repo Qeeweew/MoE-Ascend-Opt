@@ -1,0 +1,89 @@
+{
+  "benchmark": "npu_w4a16_linear_8192",
+  "timestamp_utc": "2026-07-13T05:14:29.196075+00:00",
+  "shape": {
+    "input_size": 8192,
+    "output_size": 8192,
+    "group_size": 32
+  },
+  "environment": {
+    "ascend_rt_visible_devices": "0",
+    "torch_version": "2.10.0+cpu",
+    "torch_npu_version": "2.10.0"
+  },
+  "settings": {
+    "num_weight_copies": 4,
+    "warmup_iterations": 10,
+    "benchmark_iterations": 100
+  },
+  "results": [
+    {
+      "batch_size": 1,
+      "input_size": 8192,
+      "output_size": 8192,
+      "bmm_us": 111.39015197753906,
+      "w4a16_us": 182.08459854125977,
+      "custom_w4a16_us": 48.769850730895996,
+      "bmm_GBs": 1204.933520757418,
+      "w4a16_GBs": 207.31427206044702,
+      "custom_w4a16_GBs": 774.017870349682,
+      "bmm_TFlops": 1.2049335207574179,
+      "w4a16_TFlops": 0.7371174117704783,
+      "custom_w4a16_TFlops": 2.752063539021092,
+      "speedup_vs_bmm": 2.2839961637810124,
+      "speedup_vs_npu": 3.7335484077237107,
+      "case": "Generic 8192x8192 Linear"
+    },
+    {
+      "batch_size": 2,
+      "input_size": 8192,
+      "output_size": 8192,
+      "bmm_us": 198.46845626831055,
+      "w4a16_us": 181.95999145507812,
+      "custom_w4a16_us": 72.55654811859131,
+      "bmm_GBs": 676.2673047577412,
+      "w4a16_GBs": 207.45624188116827,
+      "custom_w4a16_GBs": 520.2664263782357,
+      "bmm_TFlops": 1.3525346095154824,
+      "w4a16_TFlops": 1.47524438671053,
+      "custom_w4a16_TFlops": 3.6996723653563435,
+      "speedup_vs_bmm": 2.735362436811635,
+      "speedup_vs_npu": 2.5078369378552914,
+      "case": "Generic 8192x8192 Linear"
+    },
+    {
+      "batch_size": 3,
+      "input_size": 8192,
+      "output_size": 8192,
+      "bmm_us": 325.6681442260742,
+      "w4a16_us": 182.1966552734375,
+      "custom_w4a16_us": 96.23769760131836,
+      "bmm_GBs": 412.13035533137054,
+      "w4a16_GBs": 207.18676719584872,
+      "custom_w4a16_GBs": 392.2447953439285,
+      "bmm_TFlops": 1.2363910659941115,
+      "w4a16_TFlops": 2.2099921834223863,
+      "custom_w4a16_TFlops": 4.183944483668571,
+      "speedup_vs_bmm": 3.3839976676833228,
+      "speedup_vs_npu": 1.893194245234537,
+      "case": "Generic 8192x8192 Linear"
+    },
+    {
+      "batch_size": 4,
+      "input_size": 8192,
+      "output_size": 8192,
+      "bmm_us": 339.47376251220703,
+      "w4a16_us": 182.10840225219727,
+      "custom_w4a16_us": 119.83505249023438,
+      "bmm_GBs": 395.3699602783697,
+      "w4a16_GBs": 207.28717364574283,
+      "custom_w4a16_GBs": 315.00579517897097,
+      "bmm_TFlops": 1.5814798411134787,
+      "w4a16_TFlops": 2.9480842474061206,
+      "custom_w4a16_TFlops": 4.480082420323143,
+      "speedup_vs_bmm": 2.8328419394640103,
+      "speedup_vs_npu": 1.5196588850081045,
+      "case": "Generic 8192x8192 Linear"
+    }
+  ]
+}

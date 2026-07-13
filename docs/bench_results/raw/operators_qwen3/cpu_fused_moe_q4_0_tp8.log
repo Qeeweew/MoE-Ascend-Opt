@@ -1,0 +1,39 @@
+================================================================================
+MoE CPU INT4 (Q4_0) Performance Test (nanovllm_ext)
+================================================================================
+OMP_NUM_THREADS: 20
+torch.get_num_threads(): 20
+Params: H=2048, I=768, E=128, K=8
+Weight sets: 4, Benchmark runs: 50
+
+Initializing handles & loading Q4_0 quantized weights...
+  Generating weights for set 1
+  Generating weights for set 2
+  Generating weights for set 3
+  Generating weights for set 4
+Setup finished. Quant type: Q4_0
+Weight bytes per expert: 2654208
+
+--- Performance Results (using get_last_run_time_ms()) ---
+Num Tokens   ActiveE  Avg Time (ms)    Weight BW (GB/s)   Compute (GFLOPS)  
+----------------------------------------------------------------------------
+1            8        0.2034           104.38             371.13            
+2            16       0.3675           115.56             410.87            
+3            24       0.4232           150.51             535.16            
+4            32       0.5123           165.78             589.44            
+5            40       0.5724           185.48             659.49            
+6            48       0.5845           217.96             774.97            
+7            56       0.6576           226.01             803.61            
+8            64       0.7342           231.38             822.69            
+16           128      1.0755           315.89             1123.17           
+32           128      1.1946           284.39             2022.35           
+64           128      1.5782           215.26             3061.52           
+128          128      2.4387           139.31             3962.71           
+256          128      4.4522           76.31              4341.07           
+512          128      8.6731           39.17              4456.86           
+1024         128      16.3677          20.76              4723.30           
+2048         128      31.8439          10.67              4855.53           
+4096         128      62.8501          5.41               4920.24           
+----------------------------------------------------------------------------
+Test complete.
+JSON result: /home/xwj/workspace/MoE-Ascend-Opt/docs/bench_results/raw/operators_qwen3/cpu_fused_moe_q4_0_tp8.json

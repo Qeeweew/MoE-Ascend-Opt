@@ -1,0 +1,38 @@
+{
+  "benchmark": "export_expert_npu_layout_q4_0",
+  "timestamp_utc": "2026-07-13T07:53:14.884075+00:00",
+  "shape": {
+    "experts": 128,
+    "hidden_size": 2048,
+    "intermediate_size": 768,
+    "output_bytes_per_expert": 2654208
+  },
+  "environment": {
+    "nanovllm_tp_size": "2",
+    "nanovllm_tp_threads_per_node": "20",
+    "torch_version": "2.10.0+cpu"
+  },
+  "results": {
+    "cold_random": {
+      "samples": 128,
+      "median_us": 502.425,
+      "p95_us": 549.905,
+      "max_us": 985.0,
+      "output_gbps": 5.282794446932377
+    },
+    "hot_same": {
+      "samples": 64,
+      "median_us": 481.36,
+      "p95_us": 490.0895,
+      "max_us": 519.31,
+      "output_gbps": 5.51397706498255
+    },
+    "second_random": {
+      "samples": 128,
+      "median_us": 485.94,
+      "p95_us": 494.9305,
+      "max_us": 516.21,
+      "output_gbps": 5.462007655266082
+    }
+  }
+}

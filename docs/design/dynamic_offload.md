@@ -23,7 +23,7 @@
 
 首版交付边界是 Qwen3 compressed-tensors 对称 Int4、TP=1。多 rank 的统一决策与 delta broadcast 留作后续扩展。
 
-真实 Qwen3 实验已经完成：K=1024 大缓存可作为上界实验，稳态命中率约 68.5%，320-token 输出与全 CPU Q4_0 逐字节一致；满载后 256-step 低频更新取得 41.51 tok/s，相对全 CPU 的 39.98 tok/s 提升约 3.8%。当前论文实现目标改为小 K 全局 expert pool；K=256 缓存约 4.17% expert instances 时端到端提升约 7.1%，且已进入稳定更新退避，因此作为默认小缓存配置；K=128 只缓存约 2.08% 的专家实例并取得可复现端到端正收益，作为最小正收益消融；K=512 缓存约 8.33% 时提升约 15.0% 但仍在替换收敛期；K=64 仅约 1.04% 且命中率不足，作为低内存消融而非默认配置。端到端收益取决于命中率和 CPU remainder 是否随 miss expert 数下降。完整记录见 `docs/bench_results/dynamic_expert_cache_qwen3.md`。
+固定 prompt 实验曾观察到 K=256 为 41.29 tok/s、相对 CPU Q4 的 38.57 tok/s 提升约 7.1%，K=512 为 44.37 tok/s。该结果来自重复相同 prompt 的稳态特例，K=256 命中率约 38.3%，不能泛化到真实多请求分布。2026-07-13 的同 seed、同 32 条 ShareGPT matched A/B 中，CPU Q4 为 37.79 tok/s，K=256 为 37.05 tok/s（-1.96%），平均窗口命中率仅约 13.1%。因此 K=256 当前只是实验默认点，尚不能称为通用正收益配置。完整记录见 `docs/bench_results/dynamic_expert_cache_qwen3.md`。
 
 固定 prompt 复现实验由 `moe_ascend_npu/tests/benchmark_expert_cache_prompt.py` 自动完成，输出每个 cache size 的请求延迟、输出 hash、cache hit window、更新退避和 local decode throughput。
 
@@ -264,7 +264,7 @@ cpu_ids = where(hit_mask, -1, topk_ids)
 
 1. **swap 期间的一致性**：实现用 M 个备用 slot，并在 graph replay 外按 stream 顺序执行“写备用 slot → 更新 table → replay”；活动 slot 不被原地覆盖。
 
-2. **CPU partial 的延迟**：未命中专家走 CPU，decode 小 batch 时 CPU 计算仍是瓶颈（现有全卸载 ~37 tok/s）。缓存的目标是**把大部分计算挪回 NPU**，命中率够高时 CPU partial 退化为少量专家。CPU 小 batch 路径必须验证“少一个 CPU expert 是否真的降 latency”：在 Qwen3 Int4 decode 单 token、TopK=8、H=2048、Ish=768 的 partial benchmark 中，8 routes 为 0.290 ms，7 routes 为 0.253 ms，多轮乱序 median 下降 12.54%，接近理论 1/8=12.5%。若命中率低，收益仍有限。P0 的命中率曲线量化此风险。
+2. **CPU partial 的延迟**：未命中专家走 CPU，decode 小 batch 时 CPU 计算仍是瓶颈（现有全卸载 ~37 tok/s）。固定 TP2、每 NUMA 节点 20 线程的精确测试中，8 routes 为 0.2661 ms、7 routes 为 0.2513 ms，下降 5.56%；8 routes 到 4 routes 下降 36.4%。多个专家在固定线程池中并行执行，因此 wall latency 不会按 route 数线性下降。缓存收益必须结合完整 route-count 曲线和实际命中分布估计，不能直接把命中率当作延迟降幅。
 
 3. **TP 一致性**：多卡下各 rank 的缓存内容必须一致（同一 (layer,expert) 要么全卡命中要么全卡 miss），否则 TP 通信错乱。Controller 决策在 rank-0，broadcast slot_table delta 给所有 rank。
 

@@ -1,6 +1,10 @@
 # bench_moe_cpu_bandwidth.py
+import argparse
+import json
 import os
 import math
+from datetime import datetime, timezone
+from pathlib import Path
 import torch
 import torch.utils.benchmark as benchmark
 import nanovllm_ext
@@ -128,18 +132,26 @@ class BenchmarkRunner:
 # 4. 主程序
 # =============================================================================
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tokens", type=int, nargs="+", default=TOKEN_COUNTS_TO_TEST)
+    parser.add_argument("--warmup", type=int, default=WARMUP_RUNS)
+    parser.add_argument("--runs", type=int, default=BENCHMARK_RUNS)
+    parser.add_argument("--weight-sets", type=int, default=NUM_WEIGHT_SETS)
+    parser.add_argument("--json-out", type=Path)
+    args = parser.parse_args()
+
     print("=" * 80)
     print("MoE CPU fused performance test (nanovllm_ext) - weight bandwidth only")
     print("=" * 80)
     print(f"OMP_NUM_THREADS: {os.environ.get('OMP_NUM_THREADS', 'Not Set')}")
     print(f"torch.get_num_threads(): {torch.get_num_threads()}")
     print(f"Params: H={HIDDEN_SIZE}, I={INTERMEDIATE_SIZE}, E={NUM_EXPERTS}, K={TOP_K}")
-    print(f"Weight sets: {NUM_WEIGHT_SETS}, min_run_time={MIN_RUN_TIME_S:.1f}s")
+    print(f"Weight sets: {args.weight_sets}, benchmark runs={args.runs}")
 
     # ---- init handles & load weights ----
     print("\nInitializing handles & loading dummy quantized weights (row-major -> repack in C++) ...")
     moe_handles = []
-    for i in range(NUM_WEIGHT_SETS):
+    for i in range(args.weight_sets):
         handle = torch.classes.nanovllm.MoEInfer(NUM_EXPERTS, HIDDEN_SIZE, INTERMEDIATE_SIZE, 0)
         gate_up_qs, gate_up_d, down_qs, down_d = create_dummy_quantized_weights_rowmajor()
 
@@ -162,7 +174,8 @@ def main():
     print(header)
     print("-" * len(header))
 
-    for num_tokens in TOKEN_COUNTS_TO_TEST:
+    results = []
+    for num_tokens in args.tokens:
         # inputs on CPU
         hidden_states = torch.randn((num_tokens, HIDDEN_SIZE), dtype=torch.float16).contiguous()
 
@@ -181,17 +194,20 @@ def main():
         weight_bytes, active_e = get_weight_bytes_for_routing(ids)
 
         # Warmup runs
-        for _ in range(WARMUP_RUNS):
+        for _ in range(args.warmup):
             runner(hidden_states, topk_w, ids)
 
         # Benchmark runs with weight cycling
         runner.reset()
-        total_time_ms = 0.0
-        for i in range(BENCHMARK_RUNS):
+        samples_ms = []
+        for i in range(args.runs):
             runner(hidden_states, topk_w, ids)
-            total_time_ms += runner.get_last_time_ms()
+            samples_ms.append(runner.get_last_time_ms())
 
-        avg_time_ms = total_time_ms / BENCHMARK_RUNS
+        samples = torch.tensor(samples_ms, dtype=torch.float64)
+        avg_time_ms = float(samples.mean())
+        p50_time_ms = float(samples.median())
+        p95_time_ms = float(torch.quantile(samples, 0.95))
         avg_time_s = avg_time_ms / 1000.0
 
         # throughput metrics
@@ -199,9 +215,47 @@ def main():
         gflops = (calculate_flops_per_layer(num_tokens) / 1e9) / avg_time_s
 
         print(f"{num_tokens:<12} {active_e:<8} {avg_time_ms:<16.4f} {bw_gb_s:<18.2f} {gflops:<18.2f}")
+        results.append({
+            "num_tokens": num_tokens,
+            "active_experts": active_e,
+            "mean_ms": avg_time_ms,
+            "p50_ms": p50_time_ms,
+            "p95_ms": p95_time_ms,
+            "weight_bandwidth_gb_s": bw_gb_s,
+            "compute_gflops": gflops,
+        })
 
     print("-" * len(header))
     print("Test complete.")
+
+    if args.json_out:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "benchmark": "cpu_fused_moe_q8_0",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "model_shape": {
+                "source": "Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32",
+                "hidden_size": HIDDEN_SIZE,
+                "moe_intermediate_size": INTERMEDIATE_SIZE,
+                "num_experts": NUM_EXPERTS,
+                "top_k": TOP_K,
+                "group_size": 32,
+            },
+            "environment": {
+                "nanovllm_tp_size": os.environ.get("NANOVLLM_TP_SIZE"),
+                "nanovllm_tp_threads_per_node": os.environ.get("NANOVLLM_TP_THREADS_PER_NODE"),
+                "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
+                "torch_version": torch.__version__,
+            },
+            "settings": {
+                "warmup": args.warmup,
+                "runs": args.runs,
+                "weight_sets": args.weight_sets,
+            },
+            "results": results,
+        }
+        args.json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        print(f"JSON result: {args.json_out}")
 
 
 if __name__ == "__main__":
