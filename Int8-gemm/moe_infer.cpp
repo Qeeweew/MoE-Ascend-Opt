@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <vector>
 #include <numa.h>
+#include <arm_neon.h>
 
 static inline void* numa_alloc_or_throw(size_t bytes, int node) {
     void* p = numa_alloc_onnode(bytes, node);
@@ -347,6 +348,158 @@ void MoEInfer::store_quantized_weights_repack(
             repack_down(tp, exp);
         });
     }
+}
+
+namespace {
+
+template <int Shift>
+static inline uint32_t gather_signed_nibbles(uint32x4_t lo, uint32x4_t hi) {
+    const uint32x4_t mask = vdupq_n_u32(0xFU);
+    // uint4b8 -> signed int4 is subtraction by eight modulo 16, i.e. xor 8.
+    lo = veorq_u32(vandq_u32(vshrq_n_u32(lo, Shift), mask), vdupq_n_u32(8U));
+    hi = veorq_u32(vandq_u32(vshrq_n_u32(hi, Shift), mask), vdupq_n_u32(8U));
+    alignas(16) uint32_t lanes[8];
+    vst1q_u32(lanes, lo);
+    vst1q_u32(lanes + 4, hi);
+    return lanes[0] | (lanes[1] << 4) | (lanes[2] << 8) | (lanes[3] << 12)
+         | (lanes[4] << 16) | (lanes[5] << 20) | (lanes[6] << 24)
+         | (lanes[7] << 28);
+}
+
+// In repack_B_q4_0 a source word's nibble order becomes
+// [0,4,1,5,2,6,3,7].  This routine simultaneously reverses that permutation,
+// transposes an 8x8 nibble tile, and converts uint4b8 to signed int4.
+static inline void cpu_tile_to_npu_rows(const uint32_t* src, uint32_t* dst,
+                                        int64_t dst_row_stride) {
+    const uint32x4_t lo = vld1q_u32(src);
+    const uint32x4_t hi = vld1q_u32(src + 4);
+    dst[0 * dst_row_stride] = gather_signed_nibbles<0>(lo, hi);
+    dst[1 * dst_row_stride] = gather_signed_nibbles<8>(lo, hi);
+    dst[2 * dst_row_stride] = gather_signed_nibbles<16>(lo, hi);
+    dst[3 * dst_row_stride] = gather_signed_nibbles<24>(lo, hi);
+    dst[4 * dst_row_stride] = gather_signed_nibbles<4>(lo, hi);
+    dst[5 * dst_row_stride] = gather_signed_nibbles<12>(lo, hi);
+    dst[6 * dst_row_stride] = gather_signed_nibbles<20>(lo, hi);
+    dst[7 * dst_row_stride] = gather_signed_nibbles<28>(lo, hi);
+}
+
+static void export_cpu_matrix_group_to_npu(
+    const uint32_t* src_qs, const uint16_t* src_d,
+    int64_t src_k, int64_t j,
+    uint32_t* dst_qs, uint16_t* dst_d,
+    int64_t dst_n, int64_t dst_n_offset, int64_t dst_k_offset) {
+    constexpr int64_t NR = 8;
+    constexpr int64_t QK = 32;
+    const int64_t src_k_blocks = src_k / QK;
+    const int64_t dst_n8 = dst_n / NR;
+
+    const int64_t dst_col = dst_n_offset + j;
+    const int64_t dst_col8 = dst_col / NR;
+    for (int64_t kb = 0; kb < src_k_blocks; ++kb) {
+        const uint16_t* scale_src = src_d + (j / NR * src_k_blocks + kb) * NR;
+        uint16_t* scale_dst = dst_d + (dst_k_offset / QK + kb) * dst_n + dst_col;
+        vst1q_u16(scale_dst, vld1q_u16(scale_src));
+
+        for (int64_t kr = 0; kr < QK / 8; ++kr) {
+            const uint32_t* tile_src =
+                src_qs + ((j / NR * src_k_blocks + kb) * (QK / 8) + kr) * NR;
+            uint32_t* tile_dst = dst_qs
+                + (dst_k_offset + kb * QK + kr * 8) * dst_n8 + dst_col8;
+            cpu_tile_to_npu_rows(tile_src, tile_dst, dst_n8);
+        }
+    }
+}
+
+}  // namespace
+
+std::vector<torch::Tensor> MoEInfer::export_expert_npu_layout(int64_t expert_idx) const {
+    TORCH_CHECK(quant_type_ == quant::QuantType::Q4_0,
+                "export_expert_npu_layout requires Q4_0 weights");
+    TORCH_CHECK(expert_idx >= 0 && expert_idx < num_experts_, "expert index out of range");
+
+    const int64_t H = hidden_size_;
+    const int64_t I = intermediate_size_;
+    auto weight_opts = torch::TensorOptions().device(torch::kCPU)
+                           .dtype(torch::kInt32).pinned_memory(true);
+    auto scale_opts = torch::TensorOptions().device(torch::kCPU)
+                          .dtype(scale_dtype_).pinned_memory(true);
+    auto w13 = torch::empty({H, 2 * I / 8}, weight_opts);
+    auto s13 = torch::empty({H / 32, 2 * I}, scale_opts);
+    auto w2 = torch::empty({I, H / 8}, weight_opts);
+    auto s2 = torch::empty({I / 32, H}, scale_opts);
+
+    export_expert_npu_layout_out(expert_idx, w13, s13, w2, s2);
+    return {w13, s13, w2, s2};
+}
+
+void MoEInfer::export_expert_npu_layout_out(
+    int64_t expert_idx, const torch::Tensor& w13, const torch::Tensor& s13,
+    const torch::Tensor& w2, const torch::Tensor& s2) const {
+    TORCH_CHECK(quant_type_ == quant::QuantType::Q4_0,
+                "export_expert_npu_layout_out requires Q4_0 weights");
+    TORCH_CHECK(expert_idx >= 0 && expert_idx < num_experts_, "expert index out of range");
+    const int64_t H = hidden_size_;
+    const int64_t I = intermediate_size_;
+    const int64_t Ish = intermediate_shard_;
+    for (const auto& tensor : {w13, s13, w2, s2}) {
+        TORCH_CHECK(tensor.device().is_cpu() && tensor.is_contiguous(),
+                    "NPU-layout export outputs must be contiguous CPU tensors");
+        TORCH_CHECK(tensor.is_pinned(), "NPU-layout export outputs must use pinned memory");
+    }
+    TORCH_CHECK(w13.scalar_type() == at::kInt && w13.sizes() == at::IntArrayRef({H, 2 * I / 8}),
+                "w13 output must be int32 [H,2I/8]");
+    TORCH_CHECK(s13.scalar_type() == scale_dtype_ && s13.sizes() == at::IntArrayRef({H / 32, 2 * I}),
+                "s13 output has wrong dtype or shape");
+    TORCH_CHECK(w2.scalar_type() == at::kInt && w2.sizes() == at::IntArrayRef({I, H / 8}),
+                "w2 output must be int32 [I,H/8]");
+    TORCH_CHECK(s2.scalar_type() == scale_dtype_ && s2.sizes() == at::IntArrayRef({I / 32, H}),
+                "s2 output has wrong dtype or shape");
+
+    auto* w13_out = reinterpret_cast<uint32_t*>(w13.data_ptr<int32_t>());
+    auto* s13_out = reinterpret_cast<uint16_t*>(s13.data_ptr());
+    auto* w2_out = reinterpret_cast<uint32_t*>(w2.data_ptr<int32_t>());
+    auto* s2_out = reinterpret_cast<uint16_t*>(s2.data_ptr());
+
+    constexpr int64_t NR = 8;
+    const int64_t gate_groups = Ish / NR;
+    const int64_t down_groups = H / NR;
+    const int64_t groups_per_tp = 2 * gate_groups + down_groups;
+    const int64_t total_groups = tp_size_ * groups_per_tp;
+    auto export_group = [&](int64_t task) {
+        const int64_t tp = task / groups_per_tp;
+        const int64_t local_task = task % groups_per_tp;
+        const auto* gate_qs = reinterpret_cast<const uint32_t*>(gate_up_qs_tp_[(size_t)tp])
+            + expert_idx * (2 * Ish * H / 8);
+        const auto* gate_d = gate_up_d_tp_[(size_t)tp]
+            + expert_idx * (2 * Ish * (H / 32));
+        const auto* down_qs = reinterpret_cast<const uint32_t*>(down_proj_qs_tp_[(size_t)tp])
+            + expert_idx * (H * Ish / 8);
+        const auto* down_d = down_proj_d_tp_[(size_t)tp]
+            + expert_idx * (H * (Ish / 32));
+
+        if (local_task < gate_groups) {
+            export_cpu_matrix_group_to_npu(
+                gate_qs, gate_d, H, local_task * NR,
+                w13_out, s13_out, 2 * I, tp * Ish, 0);
+        } else if (local_task < 2 * gate_groups) {
+            const int64_t group = local_task - gate_groups;
+            export_cpu_matrix_group_to_npu(
+                gate_qs + Ish * H / 8, gate_d + Ish * (H / 32),
+                H, group * NR, w13_out, s13_out, 2 * I,
+                I + tp * Ish, 0);
+        } else {
+            const int64_t group = local_task - 2 * gate_groups;
+            export_cpu_matrix_group_to_npu(
+                down_qs, down_d, Ish, group * NR,
+                w2_out, s2_out, H, 0, tp * Ish);
+        }
+    };
+
+    // Repack itself deliberately runs only on NUMA0.  It still reads and merges
+    // every MoEInfer TP/NUMA shard, but hundreds of independent 8-column groups
+    // are distributed across the complete NUMA0 worker pool.
+    nanovllm::NumaExecutorManager::get(0)->pool->parallel_for_static(
+        0, total_groups, export_group);
 }
 
 void MoEInfer::quantize_and_store_expert(

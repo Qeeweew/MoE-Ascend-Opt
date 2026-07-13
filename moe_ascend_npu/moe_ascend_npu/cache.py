@@ -43,10 +43,10 @@ class ExpertCacheConfig:
 @dataclass
 class _LayerSource:
     handle: object
-    w13: torch.Tensor
-    s13: torch.Tensor
-    w2: torch.Tensor
-    s2: torch.Tensor
+    num_experts: int
+    hidden_size: int
+    intermediate_size: int
+    scale_dtype: torch.dtype
 
 
 class ExpertCacheManager:
@@ -70,6 +70,9 @@ class ExpertCacheManager:
         self.slot_owner: list[Optional[Tuple[int, int]]] = []
         self.owner_slot: Dict[Tuple[int, int], int] = {}
         self.cooldown: Dict[Tuple[int, int], int] = {}
+        self._staging_buffers: list[Tuple[torch.Tensor, ...]] = []
+        self._staging_events: list[Optional[object]] = []
+        self._staging_cursor = 0
         self.replay_steps = 0
         self.started = False
         self.total_routes = 0
@@ -88,30 +91,32 @@ class ExpertCacheManager:
         self,
         layer_idx: int,
         handle,
-        w13: torch.Tensor,
-        s13: torch.Tensor,
-        w2: torch.Tensor,
-        s2: torch.Tensor,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size: int,
+        scale_dtype: torch.dtype,
     ) -> None:
         with self._lock:
             if self.sources:
                 first = self.sources[min(self.sources)]
-                shapes = (w13.shape[1:], w2.shape[1:])
-                expected = (first.w13.shape[1:], first.w2.shape[1:])
-                if shapes != expected:
+                shape = (hidden_size, intermediate_size, num_experts)
+                expected = (
+                    first.hidden_size, first.intermediate_size, first.num_experts
+                )
+                if shape != expected:
                     raise ValueError(
                         "all layers sharing the expert cache must have identical expert shapes: "
-                        f"layer {layer_idx} has {shapes}, expected {expected}"
+                        f"layer {layer_idx} has {shape}, expected {expected}"
                     )
             self.sources[layer_idx] = _LayerSource(
                 handle=handle,
-                w13=w13,
-                s13=s13,
-                w2=w2,
-                s2=s2,
+                num_experts=int(num_experts),
+                hidden_size=int(hidden_size),
+                intermediate_size=int(intermediate_size),
+                scale_dtype=scale_dtype,
             )
             self.freq[layer_idx] = torch.zeros(
-                w13.shape[0], dtype=torch.float64
+                num_experts, dtype=torch.float64
             )
 
     def ensure_allocated(self) -> None:
@@ -123,32 +128,48 @@ class ExpertCacheManager:
             if not self.sources:
                 raise RuntimeError("expert cache has no registered MoE layers")
             first = self.sources[min(self.sources)]
-            num_experts = int(first.w13.shape[0])
+            num_experts = first.num_experts
             num_layers = max(self.sources) + 1
             physical = self.config.size + self.config.swap_per_update
             device = torch.device("npu", torch.npu.current_device())
+            hidden = first.hidden_size
+            intermediate = first.intermediate_size
 
-            # compressed-tensors source [E,N,K/8] -> kernel [slot,K,N/8]
             self.w13_cache = torch.empty(
-                physical, first.w13.shape[2] * 8, first.w13.shape[1] // 8,
+                physical, hidden, 2 * intermediate // 8,
                 dtype=torch.int32, device=device,
             )
             self.s13_cache = torch.empty(
-                physical, first.s13.shape[2], first.s13.shape[1],
-                dtype=first.s13.dtype, device=device,
+                physical, hidden // 32, 2 * intermediate,
+                dtype=first.scale_dtype, device=device,
             )
             self.w2_cache = torch.empty(
-                physical, first.w2.shape[2] * 8, first.w2.shape[1] // 8,
+                physical, intermediate, hidden // 8,
                 dtype=torch.int32, device=device,
             )
             self.s2_cache = torch.empty(
-                physical, first.s2.shape[2], first.s2.shape[1],
-                dtype=first.s2.dtype, device=device,
+                physical, intermediate // 32, hidden,
+                dtype=first.scale_dtype, device=device,
             )
             self.slot_table = torch.full(
                 (num_layers, num_experts), -1, dtype=torch.int32, device=device
             )
             self.slot_owner = [None] * physical
+            # One pinned staging set per maximum replacement in an update.
+            # They are reused through the C++ _out API, avoiding allocation on
+            # the cache-control hot path while retaining asynchronous H2D.
+            for _ in range(self.config.swap_per_update):
+                self._staging_buffers.append((
+                    torch.empty(hidden, 2 * intermediate // 8, dtype=torch.int32,
+                                device="cpu", pin_memory=True),
+                    torch.empty(hidden // 32, 2 * intermediate,
+                                dtype=first.scale_dtype, device="cpu", pin_memory=True),
+                    torch.empty(intermediate, hidden // 8, dtype=torch.int32,
+                                device="cpu", pin_memory=True),
+                    torch.empty(intermediate // 32, hidden,
+                                dtype=first.scale_dtype, device="cpu", pin_memory=True),
+                ))
+                self._staging_events.append(None)
             slot_bytes = (
                 self.w13_cache[0].nbytes + self.s13_cache[0].nbytes
                 + self.w2_cache[0].nbytes + self.s2_cache[0].nbytes
@@ -315,16 +336,25 @@ class ExpertCacheManager:
         return float(self.freq[victim[0]][victim[1]]), victim
 
     def _load_owner_into_slot(self, owner: Tuple[int, int], slot: int) -> None:
-        from moe_ascend_npu.patches.fused_moe_method import _transpose_and_repack_int4
-
         layer_idx, expert_idx = owner
         src = self.sources[layer_idx]
-        w13 = _transpose_and_repack_int4(src.w13[expert_idx:expert_idx + 1].npu())
-        w2 = _transpose_and_repack_int4(src.w2[expert_idx:expert_idx + 1].npu())
-        self.w13_cache[slot].copy_(w13[0])
-        self.w2_cache[slot].copy_(w2[0])
-        self.s13_cache[slot].copy_(src.s13[expert_idx].npu().transpose(-1, -2).contiguous())
-        self.s2_cache[slot].copy_(src.s2[expert_idx].npu().transpose(-1, -2).contiguous())
+        staging_idx = self._staging_cursor
+        self._staging_cursor = (self._staging_cursor + 1) % len(self._staging_buffers)
+        prior_copy = self._staging_events[staging_idx]
+        if prior_copy is not None:
+            # Normally already complete because updates are separated by many
+            # graph replays; this is the correctness guard for aggressive
+            # configurations that cycle the staging ring sooner.
+            prior_copy.synchronize()
+        w13, s13, w2, s2 = self._staging_buffers[staging_idx]
+        src.handle.export_expert_npu_layout_out(expert_idx, w13, s13, w2, s2)
+        self.w13_cache[slot].copy_(w13, non_blocking=True)
+        self.s13_cache[slot].copy_(s13, non_blocking=True)
+        self.w2_cache[slot].copy_(w2, non_blocking=True)
+        self.s2_cache[slot].copy_(s2, non_blocking=True)
+        event = torch.npu.Event()
+        event.record(torch.npu.current_stream())
+        self._staging_events[staging_idx] = event
 
     def metrics(self) -> dict:
         hit_rate = 0.0 if self.total_routes == 0 else 1.0 - self.total_misses / self.total_routes

@@ -470,6 +470,16 @@ TORCH_LIBRARY_FRAGMENT(nanovllm, m) {
                 const torch::Tensor& down_qs, const torch::Tensor& down_d) {
                  self->impl->store_quantized_weights_repack(gate_up_qs, gate_up_d, down_qs, down_d);
              })
+        .def("export_expert_npu_layout",
+             [](const c10::intrusive_ptr<MoEInferHandle>& self, int64_t expert_idx) {
+                 return self->impl->export_expert_npu_layout(expert_idx);
+             })
+        .def("export_expert_npu_layout_out",
+             [](const c10::intrusive_ptr<MoEInferHandle>& self, int64_t expert_idx,
+                const torch::Tensor& w13, const torch::Tensor& s13,
+                const torch::Tensor& w2, const torch::Tensor& s2) {
+                 self->impl->export_expert_npu_layout_out(expert_idx, w13, s13, w2, s2);
+             })
         .def("get_last_run_time_ms",
              [](const c10::intrusive_ptr<MoEInferHandle>& self) {
                  return self->impl->get_last_run_time_ms();

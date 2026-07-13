@@ -50,6 +50,15 @@ public:
         const torch::Tensor& down_proj_qs, const torch::Tensor& down_proj_d
     );
 
+    // Export one Q4_0 expert directly in the layout consumed by the Ascend
+    // W4A16 cache.  The returned CPU tensors use pinned memory so Python can
+    // enqueue H2D copy_(..., non_blocking=True) without an intermediate copy.
+    // Shapes: w13 [H,2I/8], s13 [H/32,2I], w2 [I,H/8], s2 [I/32,H].
+    std::vector<torch::Tensor> export_expert_npu_layout(int64_t expert_idx) const;
+    void export_expert_npu_layout_out(
+        int64_t expert_idx, const torch::Tensor& w13, const torch::Tensor& s13,
+        const torch::Tensor& w2, const torch::Tensor& s2) const;
+
     // Get weight pointers for direct dispatch (zero-overhead callback)
     const void* const* gate_up_qs_tp_data() const { return reinterpret_cast<const void* const*>(gate_up_qs_tp_.data()); }
     const void* const* gate_up_d_tp_data() const { return reinterpret_cast<const void* const*>(gate_up_d_tp_.data()); }

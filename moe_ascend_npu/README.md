@@ -33,20 +33,20 @@ export NANOVLLM_TP_SIZE=2
 sglang launch-server \
   --model-path /mnt/models/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-gs32 \
   --attention-backend ascend \
-  --enable-moe-expert-cache \
-  --moe-expert-cache-size 256 \
-  --moe-expert-cache-swap-per-update 8 \
-  --moe-expert-cache-update-interval 16 \
-  --moe-expert-cache-warmup-steps 16
+  --enable-moe-expert-cache
 ```
+
+The default cache configuration is the measured small-cache point:
+``--moe-expert-cache-size 256``, ``--moe-expert-cache-swap-per-update 8``,
+``--moe-expert-cache-update-interval 16`` and
+``--moe-expert-cache-warmup-steps 16``.  Override these only for ablations.
 
 Do not pass ``--disable-cuda-graph``. The fixed cache tensors and slot table are
 captured once; LFU replacement is driven by a hook immediately before graph
 replay and does not recapture the graph. ``--enable-moe-expert-cache`` and
-``--enable-moe-offload`` are mutually exclusive. The configured update interval
-is used while filling; after the cache is full, the controller automatically
-backs off to a longer steady-state interval when replacement stops changing the
-working set.
+``--enable-moe-offload`` are mutually exclusive. After the cache is full, the
+controller automatically backs off to a longer steady-state interval when
+replacement stops changing the working set.
 
 ## What the package provides
 

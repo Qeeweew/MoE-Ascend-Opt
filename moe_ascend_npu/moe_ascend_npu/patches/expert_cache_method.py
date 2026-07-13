@@ -50,17 +50,21 @@ class ExpertCacheFusedMoEMethod(MoEOffloadInt4FusedMoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.offload_config is None or self.moe_infer_handle is None:
             return
-        # Materialise one authoritative CPU copy.  SGLang's loader may place
-        # parameters created with device="cpu" onto NPU while loading; keeping
-        # the layer Parameters alive would therefore defeat the HBM-saving
-        # purpose of the cache.
+        # Use loader tensors only to initialise MoEInfer.  MoEInfer's NUMA Q4_0
+        # buffers become the sole persistent CPU weight copy; cache replacement
+        # exports individual experts from that storage into pinned staging.
         w13 = layer.w13_weight_packed.data.cpu().contiguous()
         s13 = layer.w13_weight_scale.data.cpu().contiguous()
         w2 = layer.w2_weight_packed.data.cpu().contiguous()
         s2 = layer.w2_weight_scale.data.cpu().contiguous()
         self.moe_infer_handle.store_quantized_repack(w13, s13, w2, s2)
         self.cache_manager.register_layer(
-            self.layer_idx, self.moe_infer_handle, w13, s13, w2, s2
+            self.layer_idx,
+            self.moe_infer_handle,
+            self.num_experts,
+            self.hidden_size,
+            self.intermediate_size,
+            s13.dtype,
         )
         # Create stream/event identities before graph capture.  Reusing these
         # objects is required for deterministic graph replay dependencies.
