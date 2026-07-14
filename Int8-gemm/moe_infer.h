@@ -4,8 +4,16 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <vector>
 #include "numa_threadpool.h"
 #include "quant_traits.h"
+
+struct MoERoutingStatsSnapshot {
+    std::vector<int64_t> counts;
+    int64_t total = 0;
+    int64_t misses = 0;
+    int64_t calls = 0;
+};
 
 class MoEInfer {
 public:
@@ -32,6 +40,7 @@ public:
     void record_routing(const int32_t* routing_ids, const int32_t* compute_ids,
                         int64_t num_tokens, int64_t top_k);
     torch::Tensor take_routing_stats();
+    MoERoutingStatsSnapshot take_routing_stats_snapshot();
     void reset_routing_stats();
 
     // Get the scale dtype (kFloat16 or kBFloat16)
@@ -58,6 +67,18 @@ public:
     void export_expert_npu_layout_out(
         int64_t expert_idx, const torch::Tensor& w13, const torch::Tensor& s13,
         const torch::Tensor& w2, const torch::Tensor& s2) const;
+    void export_experts_npu_layout_out(
+        const torch::Tensor& expert_indices,
+        const torch::Tensor& w13, const torch::Tensor& s13,
+        const torch::Tensor& w2, const torch::Tensor& s2) const;
+
+    // Low-level group export used by the global C++ cache scheduler. Outputs
+    // point at one row of the batched NPU-layout staging tensors.
+    int64_t npu_layout_export_groups() const;
+    void export_expert_npu_layout_group(
+        int64_t expert_idx, int64_t task,
+        uint32_t* w13_out, uint16_t* s13_out,
+        uint32_t* w2_out, uint16_t* s2_out) const;
 
     // Get weight pointers for direct dispatch (zero-overhead callback)
     const void* const* gate_up_qs_tp_data() const { return reinterpret_cast<const void* const*>(gate_up_qs_tp_.data()); }

@@ -1,5 +1,7 @@
 .vscode/
 .agents/
+docs/thesis/
+docs/bench_results/
 **/build/
 **/*.egg-info/
 

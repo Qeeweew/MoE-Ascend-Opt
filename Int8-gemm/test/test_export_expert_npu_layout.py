@@ -57,6 +57,16 @@ def test_export_expert_npu_layout():
         torch.npu.synchronize()
         assert torch.equal(copied.cpu(), got_w13)
 
+    order = torch.tensor([2, 0, 1], dtype=torch.int64)
+    refs = [handle.export_expert_npu_layout(int(expert)) for expert in order]
+    batch_out = tuple(
+        torch.empty((len(order), *ref.shape), dtype=ref.dtype, pin_memory=True)
+        for ref in refs[0]
+    )
+    handle.export_experts_npu_layout_out(order, *batch_out)
+    for row, ref in enumerate(refs):
+        assert all(torch.equal(out[row], expected) for out, expected in zip(batch_out, ref))
+
 
 if __name__ == "__main__":
     test_export_expert_npu_layout()

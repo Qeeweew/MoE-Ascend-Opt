@@ -20,6 +20,89 @@ _SIDE_STREAM_LOCK = threading.Lock()
 _CPU_SIDE_STREAMS: Dict[int, Any] = {}
 
 
+def _npu_grouped_moe_cached_hits(
+    hidden_states: torch.Tensor,
+    slot_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    w13: torch.Tensor,
+    s13: torch.Tensor,
+    w2: torch.Tensor,
+    s2: torch.Tensor,
+) -> torch.Tensor:
+    """Run only cache-hit prefill routes with the original NPU grouped GEMM.
+
+    Each selected token/expert route becomes one ``top_k=1`` input row.  This
+    avoids sending misses to a dummy cache slot (which would still execute a
+    full expert GEMM) while preserving the official NPU MoE sequence:
+    init-routing, grouped matmul, SwiGLU, grouped matmul, finalize-routing.
+    """
+    hit_mask = slot_ids >= 0
+    token_ids = (
+        torch.arange(
+            hidden_states.shape[0], dtype=torch.int64,
+            device=hidden_states.device,
+        )
+        .view(-1, 1)
+        .expand_as(slot_ids)[hit_mask]
+    )
+    hit_slot_ids = slot_ids[hit_mask].reshape(-1, 1)
+    if hit_slot_ids.numel() == 0:
+        return torch.zeros_like(hidden_states)
+
+    routed_hidden = hidden_states.index_select(0, token_ids)
+    routed_weights = topk_weights[hit_mask].reshape(-1, 1).to(hidden_states.dtype)
+    num_routes = routed_hidden.shape[0]
+    row_idx = torch.arange(
+        num_routes, dtype=torch.int32, device=hidden_states.device
+    ).view(-1, 1)
+    routed_hidden, expanded_row_idx, expanded_expert_idx = (
+        torch.ops.npu.npu_moe_init_routing(
+            routed_hidden,
+            row_idx=row_idx,
+            expert_idx=hit_slot_ids,
+            active_num=num_routes,
+        )
+    )
+    expert_tokens = torch.ops.npu.npu_moe_compute_expert_tokens(
+        expanded_expert_idx, w13.shape[0]
+    ).to(torch.int64)
+
+    routed_hidden = torch.ops.npu.npu_grouped_matmul(
+        x=[routed_hidden],
+        weight=[w13],
+        antiquant_scale=[s13],
+        split_item=2,
+        group_list_type=0,
+        group_type=0,
+        group_list=expert_tokens,
+        output_dtype=hidden_states.dtype,
+    )[0]
+    routed_hidden = torch.ops.npu.npu_swiglu(routed_hidden)
+    routed_hidden = torch.ops.npu.npu_grouped_matmul(
+        x=[routed_hidden],
+        weight=[w2],
+        antiquant_scale=[s2],
+        split_item=2,
+        group_list_type=0,
+        group_type=0,
+        group_list=expert_tokens,
+        output_dtype=hidden_states.dtype,
+    )[0]
+    routed_hidden = torch.ops.npu.npu_moe_finalize_routing(
+        routed_hidden,
+        skip1=None,
+        skip2=None,
+        bias=None,
+        scales=routed_weights,
+        expanded_src_to_dst_row=expanded_row_idx,
+        export_for_source_row=hit_slot_ids,
+    )
+
+    output = torch.zeros_like(hidden_states)
+    output.index_add_(0, token_ids, routed_hidden)
+    return output
+
+
 def _get_cpu_side_stream():
     """One CPU-callback submission stream per NPU device.
 
@@ -84,6 +167,7 @@ class ExpertCacheFusedMoEMethod(MoEOffloadInt4FusedMoEMethod):
         logger.info("[ExpertCache] registered layer %d (%d experts)", self.layer_idx, self.num_experts)
 
     def apply(self, layer, dispatch_output):
+        from sglang.srt.layers.dp_attention import get_is_extend_in_batch
         from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
         from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
         import torch_npu
@@ -100,6 +184,32 @@ class ExpertCacheFusedMoEMethod(MoEOffloadInt4FusedMoEMethod):
         cpu_ids = torch.where(slot_ids >= 0, torch.full_like(topk_ids, -1), topk_ids)
 
         main_stream = torch_npu.npu.current_stream()
+        if get_is_extend_in_batch():
+            # Prefill keeps the official torch_npu grouped-GEMM implementation.
+            # A start callback dispatches CPU misses and immediately returns;
+            # grouped GEMM computes compacted cache-hit routes while CPU workers
+            # are active; the second callback joins and copies the CPU result.
+            _get_or_create_global_callback_manager(int(main_stream.npu_stream))
+            num_tokens, top_k = int(x.shape[0]), int(topk_ids.shape[1])
+            dtype_int = 1 if x.dtype == torch.bfloat16 else 0
+            ctx = torch.classes.nanovllm.MoEGraphContext(
+                self.moe_infer_handle, num_tokens, top_k, dtype_int
+            )
+            torch.ops.nanovllm.moe_forward_npu_graph_partial_start(
+                x, cpu_ids, topk_ids, topk_weights,
+                self.moe_infer_handle, ctx,
+            )
+            npu_out = _npu_grouped_moe_cached_hits(
+                x, slot_ids, topk_weights,
+                self.cache_manager.w13_cache, self.cache_manager.s13_cache,
+                self.cache_manager.w2_cache, self.cache_manager.s2_cache,
+            )
+            cpu_out = torch.empty_like(x)
+            torch.ops.nanovllm.moe_forward_npu_eager_partial_wait_out(cpu_out, ctx)
+            return StandardCombineInput(
+                hidden_states=torch.add(npu_out, cpu_out)
+            )
+
         if get_is_capture_mode():
             # Decode graph path: keep everything on one stream.  The first
             # callback only dispatches CPU work to a dedicated coordinator and

@@ -99,16 +99,27 @@ void MoEInfer::record_routing(const int32_t* routing_ids,
 }
 
 torch::Tensor MoEInfer::take_routing_stats() {
+    auto snapshot = take_routing_stats_snapshot();
     auto result = torch::zeros({num_experts_ + 3}, torch::TensorOptions().dtype(torch::kInt64));
     auto* out = result.data_ptr<int64_t>();
+    std::copy(snapshot.counts.begin(), snapshot.counts.end(), out);
+    out[num_experts_] = snapshot.total;
+    out[num_experts_ + 1] = snapshot.misses;
+    out[num_experts_ + 2] = snapshot.calls;
+    return result;
+}
+
+MoERoutingStatsSnapshot MoEInfer::take_routing_stats_snapshot() {
+    MoERoutingStatsSnapshot snapshot;
+    snapshot.counts.resize((size_t)num_experts_);
     std::lock_guard<std::mutex> guard(routing_stats_mutex_);
-    std::copy(routing_counts_.begin(), routing_counts_.end(), out);
-    out[num_experts_] = routing_total_;
-    out[num_experts_ + 1] = routing_miss_;
-    out[num_experts_ + 2] = routing_calls_;
+    std::copy(routing_counts_.begin(), routing_counts_.end(), snapshot.counts.begin());
+    snapshot.total = routing_total_;
+    snapshot.misses = routing_miss_;
+    snapshot.calls = routing_calls_;
     std::fill(routing_counts_.begin(), routing_counts_.end(), 0);
     routing_total_ = routing_miss_ = routing_calls_ = 0;
-    return result;
+    return snapshot;
 }
 
 void MoEInfer::reset_routing_stats() {
@@ -445,7 +456,6 @@ void MoEInfer::export_expert_npu_layout_out(
     TORCH_CHECK(expert_idx >= 0 && expert_idx < num_experts_, "expert index out of range");
     const int64_t H = hidden_size_;
     const int64_t I = intermediate_size_;
-    const int64_t Ish = intermediate_shard_;
     for (const auto& tensor : {w13, s13, w2, s2}) {
         TORCH_CHECK(tensor.device().is_cpu() && tensor.is_contiguous(),
                     "NPU-layout export outputs must be contiguous CPU tensors");
@@ -464,47 +474,126 @@ void MoEInfer::export_expert_npu_layout_out(
     auto* s13_out = reinterpret_cast<uint16_t*>(s13.data_ptr());
     auto* w2_out = reinterpret_cast<uint32_t*>(w2.data_ptr<int32_t>());
     auto* s2_out = reinterpret_cast<uint16_t*>(s2.data_ptr());
-
-    constexpr int64_t NR = 8;
-    const int64_t gate_groups = Ish / NR;
-    const int64_t down_groups = H / NR;
-    const int64_t groups_per_tp = 2 * gate_groups + down_groups;
-    const int64_t total_groups = tp_size_ * groups_per_tp;
-    auto export_group = [&](int64_t task) {
-        const int64_t tp = task / groups_per_tp;
-        const int64_t local_task = task % groups_per_tp;
-        const auto* gate_qs = reinterpret_cast<const uint32_t*>(gate_up_qs_tp_[(size_t)tp])
-            + expert_idx * (2 * Ish * H / 8);
-        const auto* gate_d = gate_up_d_tp_[(size_t)tp]
-            + expert_idx * (2 * Ish * (H / 32));
-        const auto* down_qs = reinterpret_cast<const uint32_t*>(down_proj_qs_tp_[(size_t)tp])
-            + expert_idx * (H * Ish / 8);
-        const auto* down_d = down_proj_d_tp_[(size_t)tp]
-            + expert_idx * (H * (Ish / 32));
-
-        if (local_task < gate_groups) {
-            export_cpu_matrix_group_to_npu(
-                gate_qs, gate_d, H, local_task * NR,
-                w13_out, s13_out, 2 * I, tp * Ish, 0);
-        } else if (local_task < 2 * gate_groups) {
-            const int64_t group = local_task - gate_groups;
-            export_cpu_matrix_group_to_npu(
-                gate_qs + Ish * H / 8, gate_d + Ish * (H / 32),
-                H, group * NR, w13_out, s13_out, 2 * I,
-                I + tp * Ish, 0);
-        } else {
-            const int64_t group = local_task - 2 * gate_groups;
-            export_cpu_matrix_group_to_npu(
-                down_qs, down_d, Ish, group * NR,
-                w2_out, s2_out, H, 0, tp * Ish);
-        }
-    };
+    const int64_t total_groups = npu_layout_export_groups();
 
     // Repack itself deliberately runs only on NUMA0.  It still reads and merges
     // every MoEInfer TP/NUMA shard, but hundreds of independent 8-column groups
     // are distributed across the complete NUMA0 worker pool.
     nanovllm::NumaExecutorManager::get(0)->pool->parallel_for_static(
-        0, total_groups, export_group);
+        0, total_groups, [&](int64_t task) {
+            export_expert_npu_layout_group(
+                expert_idx, task, w13_out, s13_out, w2_out, s2_out);
+        });
+}
+
+int64_t MoEInfer::npu_layout_export_groups() const {
+    constexpr int64_t NR = 8;
+    return tp_size_ * (2 * (intermediate_shard_ / NR) + hidden_size_ / NR);
+}
+
+void MoEInfer::export_expert_npu_layout_group(
+    int64_t expert_idx, int64_t task,
+    uint32_t* w13_out, uint16_t* s13_out,
+    uint32_t* w2_out, uint16_t* s2_out) const {
+    // Internal hot path: callers validate the expert and task range once
+    // before dispatching thousands of layout groups to the worker pool.
+    const int64_t H = hidden_size_;
+    const int64_t I = intermediate_size_;
+    const int64_t Ish = intermediate_shard_;
+    constexpr int64_t NR = 8;
+    const int64_t gate_groups = Ish / NR;
+    const int64_t down_groups = H / NR;
+    const int64_t groups_per_tp = 2 * gate_groups + down_groups;
+    const int64_t tp = task / groups_per_tp;
+    const int64_t local_task = task % groups_per_tp;
+    const auto* gate_qs = reinterpret_cast<const uint32_t*>(gate_up_qs_tp_[(size_t)tp])
+        + expert_idx * (2 * Ish * H / 8);
+    const auto* gate_d = gate_up_d_tp_[(size_t)tp]
+        + expert_idx * (2 * Ish * (H / 32));
+    const auto* down_qs = reinterpret_cast<const uint32_t*>(down_proj_qs_tp_[(size_t)tp])
+        + expert_idx * (H * Ish / 8);
+    const auto* down_d = down_proj_d_tp_[(size_t)tp]
+        + expert_idx * (H * (Ish / 32));
+
+    if (local_task < gate_groups) {
+        export_cpu_matrix_group_to_npu(
+            gate_qs, gate_d, H, local_task * NR,
+            w13_out, s13_out, 2 * I, tp * Ish, 0);
+    } else if (local_task < 2 * gate_groups) {
+        const int64_t group = local_task - gate_groups;
+        export_cpu_matrix_group_to_npu(
+            gate_qs + Ish * H / 8, gate_d + Ish * (H / 32),
+            H, group * NR, w13_out, s13_out, 2 * I,
+            I + tp * Ish, 0);
+    } else {
+        const int64_t group = local_task - 2 * gate_groups;
+        export_cpu_matrix_group_to_npu(
+            down_qs, down_d, Ish, group * NR,
+            w2_out, s2_out, H, 0, tp * Ish);
+    }
+}
+
+void MoEInfer::export_experts_npu_layout_out(
+    const torch::Tensor& expert_indices,
+    const torch::Tensor& w13, const torch::Tensor& s13,
+    const torch::Tensor& w2, const torch::Tensor& s2) const {
+    TORCH_CHECK(quant_type_ == quant::QuantType::Q4_0,
+                "export_experts_npu_layout_out requires Q4_0 weights");
+    TORCH_CHECK(expert_indices.device().is_cpu() && expert_indices.is_contiguous()
+                    && expert_indices.dim() == 1,
+                "expert_indices must be a contiguous 1D CPU tensor");
+    TORCH_CHECK(expert_indices.scalar_type() == at::kLong,
+                "expert_indices must be int64");
+    const int64_t batch = expert_indices.numel();
+    TORCH_CHECK(batch > 0, "expert_indices must not be empty");
+    const int64_t H = hidden_size_;
+    const int64_t I = intermediate_size_;
+    for (const auto& tensor : {w13, s13, w2, s2}) {
+        TORCH_CHECK(tensor.device().is_cpu() && tensor.is_contiguous(),
+                    "batched NPU-layout outputs must be contiguous CPU tensors");
+        TORCH_CHECK(tensor.is_pinned(),
+                    "batched NPU-layout outputs must use pinned memory");
+    }
+    TORCH_CHECK(w13.scalar_type() == at::kInt
+                    && w13.sizes() == at::IntArrayRef({batch, H, 2 * I / 8}),
+                "w13 output must be int32 [B,H,2I/8]");
+    TORCH_CHECK(s13.scalar_type() == scale_dtype_
+                    && s13.sizes() == at::IntArrayRef({batch, H / 32, 2 * I}),
+                "s13 output has wrong dtype or shape");
+    TORCH_CHECK(w2.scalar_type() == at::kInt
+                    && w2.sizes() == at::IntArrayRef({batch, I, H / 8}),
+                "w2 output must be int32 [B,I,H/8]");
+    TORCH_CHECK(s2.scalar_type() == scale_dtype_
+                    && s2.sizes() == at::IntArrayRef({batch, I / 32, H}),
+                "s2 output has wrong dtype or shape");
+
+    const auto* experts = expert_indices.data_ptr<int64_t>();
+    for (int64_t row = 0; row < batch; ++row) {
+        const int64_t expert = experts[row];
+        TORCH_CHECK(expert >= 0 && expert < num_experts_,
+                    "expert index out of range at batch row ", row);
+    }
+    auto* w13_base = reinterpret_cast<uint32_t*>(w13.data_ptr<int32_t>());
+    auto* s13_base = reinterpret_cast<uint16_t*>(s13.data_ptr());
+    auto* w2_base = reinterpret_cast<uint32_t*>(w2.data_ptr<int32_t>());
+    auto* s2_base = reinterpret_cast<uint16_t*>(s2.data_ptr());
+    const int64_t w13_stride = H * (2 * I / 8);
+    const int64_t s13_stride = (H / 32) * (2 * I);
+    const int64_t w2_stride = I * (H / 8);
+    const int64_t s2_stride = (I / 32) * H;
+    const int64_t groups = npu_layout_export_groups();
+
+    nanovllm::NumaExecutorManager::get(0)->pool->parallel_for_static(
+        0, batch * groups, [&](int64_t task) {
+            const int64_t row = task / groups;
+            const int64_t group = task % groups;
+            export_expert_npu_layout_group(
+                experts[row], group,
+                w13_base + row * w13_stride,
+                s13_base + row * s13_stride,
+                w2_base + row * w2_stride,
+                s2_base + row * s2_stride);
+        });
 }
 
 void MoEInfer::quantize_and_store_expert(

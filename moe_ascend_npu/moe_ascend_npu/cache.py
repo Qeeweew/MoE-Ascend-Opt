@@ -79,6 +79,11 @@ class ExpertCacheManager:
         self._staging_buffers: list[Tuple[torch.Tensor, ...]] = []
         self._staging_events: list[Optional[object]] = []
         self._staging_cursor = 0
+        self._cpp_scheduler = None
+        self._plan_buffer: Optional[torch.Tensor] = None
+        self._batch_staging: Optional[Tuple[torch.Tensor, ...]] = None
+        self._batch_staging_event = None
+        self._batch_staging_inflight = False
         self.replay_steps = 0
         self.started = False
         self.total_routes = 0
@@ -132,6 +137,21 @@ class ExpertCacheManager:
             self.freq[layer_idx] = torch.zeros(
                 num_experts, dtype=torch.float64
             )
+            # Trace mode retains the Python policy because it serialises every
+            # layer's raw route histogram.  Normal serving keeps route
+            # collection, EMA-LFU, victim selection and slot allocation in a
+            # single C++ object; Python only submits H2D copies and publishes
+            # the device slot table.
+            if not self._trace_path:
+                if self._cpp_scheduler is None:
+                    self._cpp_scheduler = torch.classes.nanovllm.ExpertCacheScheduler(
+                        self.config.size,
+                        self.config.swap_per_update,
+                        self.config.update_interval,
+                        self.config.warmup_steps,
+                        self.config.decay,
+                    )
+                self._cpp_scheduler.register_layer(layer_idx, handle)
 
     def ensure_allocated(self) -> None:
         if self.slot_table is not None:
@@ -169,21 +189,39 @@ class ExpertCacheManager:
                 (num_layers, num_experts), -1, dtype=torch.int32, device=device
             )
             self.slot_owner = [None] * physical
-            # One pinned staging set per maximum replacement in an update.
-            # They are reused through the C++ _out API, avoiding allocation on
-            # the cache-control hot path while retaining asynchronous H2D.
-            for _ in range(self.config.swap_per_update):
-                self._staging_buffers.append((
-                    torch.empty(hidden, 2 * intermediate // 8, dtype=torch.int32,
-                                device="cpu", pin_memory=True),
-                    torch.empty(hidden // 32, 2 * intermediate,
+            if self._cpp_scheduler is not None:
+                # One batched pinned set replaces N independent single-expert
+                # exports.  C++ schedules all batch x layout-group tasks in a
+                # single NUMA worker-pool dispatch.
+                batch = self.config.swap_per_update
+                self._plan_buffer = torch.empty(
+                    batch, 5, dtype=torch.int64, device="cpu"
+                )
+                self._batch_staging = (
+                    torch.empty(batch, hidden, 2 * intermediate // 8,
+                                dtype=torch.int32, device="cpu", pin_memory=True),
+                    torch.empty(batch, hidden // 32, 2 * intermediate,
                                 dtype=first.scale_dtype, device="cpu", pin_memory=True),
-                    torch.empty(intermediate, hidden // 8, dtype=torch.int32,
-                                device="cpu", pin_memory=True),
-                    torch.empty(intermediate // 32, hidden,
+                    torch.empty(batch, intermediate, hidden // 8,
+                                dtype=torch.int32, device="cpu", pin_memory=True),
+                    torch.empty(batch, intermediate // 32, hidden,
                                 dtype=first.scale_dtype, device="cpu", pin_memory=True),
-                ))
-                self._staging_events.append(None)
+                )
+                self._batch_staging_event = torch.npu.Event()
+            else:
+                # Raw-trace mode keeps the reference Python implementation.
+                for _ in range(self.config.swap_per_update):
+                    self._staging_buffers.append((
+                        torch.empty(hidden, 2 * intermediate // 8, dtype=torch.int32,
+                                    device="cpu", pin_memory=True),
+                        torch.empty(hidden // 32, 2 * intermediate,
+                                    dtype=first.scale_dtype, device="cpu", pin_memory=True),
+                        torch.empty(intermediate, hidden // 8, dtype=torch.int32,
+                                    device="cpu", pin_memory=True),
+                        torch.empty(intermediate // 32, hidden,
+                                    dtype=first.scale_dtype, device="cpu", pin_memory=True),
+                    ))
+                    self._staging_events.append(None)
             slot_bytes = (
                 self.w13_cache[0].nbytes + self.s13_cache[0].nbytes
                 + self.w2_cache[0].nbytes + self.s2_cache[0].nbytes
@@ -195,6 +233,9 @@ class ExpertCacheManager:
             )
 
     def reset_capture_stats(self) -> None:
+        if self._cpp_scheduler is not None:
+            self._cpp_scheduler.reset_routing_stats()
+            return
         for source in self.sources.values():
             source.handle.reset_routing_stats()
 
@@ -203,6 +244,9 @@ class ExpertCacheManager:
         if not self.enabled:
             return
         self.ensure_allocated()
+        if self._cpp_scheduler is not None:
+            self._before_replay_cpp(int(valid_tokens))
+            return
         with self._lock:
             if not self.started:
                 self.reset_capture_stats()
@@ -255,6 +299,72 @@ class ExpertCacheManager:
                 })
                 self._append_trace(self._pending_trace_record)
                 self._pending_trace_record = None
+
+    def _before_replay_cpp(self, valid_tokens: int) -> None:
+        """Run the normal-serving cache policy in C++ and submit its plan."""
+        with self._lock:
+            control_begin = time.perf_counter_ns()
+            count = int(self._cpp_scheduler.plan_out(valid_tokens, self._plan_buffer))
+            if count < 0:
+                self.replay_steps += 1
+                return
+            counters, rates = self._cpp_scheduler.last_stats()
+            counter_values = counters.tolist()
+            self.replay_steps = int(counter_values[0])
+            window_total = int(counter_values[3])
+            window_miss = int(counter_values[4])
+            hit_rate = float(rates[0])
+            self.total_routes += window_total
+            self.total_misses += window_miss
+            if count:
+                plan = self._plan_buffer[:count]
+                if self._batch_staging_inflight:
+                    wait_begin = time.perf_counter_ns()
+                    self._batch_staging_event.synchronize()
+                    self._staging_wait_us.append(
+                        (time.perf_counter_ns() - wait_begin) / 1e3
+                    )
+
+                staging = tuple(tensor[:count] for tensor in self._batch_staging)
+                export_begin = time.perf_counter_ns()
+                self._cpp_scheduler.export_plan_out(plan, *staging)
+                self._export_us.append(
+                    (time.perf_counter_ns() - export_begin) / 1e3
+                )
+
+                rows = plan.tolist()
+                copy_begin = time.perf_counter_ns()
+                for row, (layer, expert, slot, victim_layer, victim_expert) in enumerate(rows):
+                    self.w13_cache[slot].copy_(staging[0][row], non_blocking=True)
+                    self.s13_cache[slot].copy_(staging[1][row], non_blocking=True)
+                    self.w2_cache[slot].copy_(staging[2][row], non_blocking=True)
+                    self.s2_cache[slot].copy_(staging[3][row], non_blocking=True)
+
+                    if victim_layer >= 0:
+                        victim = (victim_layer, victim_expert)
+                        old_slot = self.owner_slot.pop(victim)
+                        self.slot_table[victim_layer, victim_expert].fill_(-1)
+                        self.slot_owner[old_slot] = None
+                    owner = (layer, expert)
+                    self.owner_slot[owner] = slot
+                    self.slot_owner[slot] = owner
+                    self.slot_table[layer, expert].fill_(slot)
+
+                self._batch_staging_event.record(torch.npu.current_stream())
+                self._batch_staging_inflight = True
+                self._copy_submit_us.append(
+                    (time.perf_counter_ns() - copy_begin) / 1e3
+                )
+                self.total_swaps += count
+
+            self._control_us.append(
+                (time.perf_counter_ns() - control_begin) / 1e3
+            )
+            logger.info(
+                "[ExpertCache] step=%d active=%d window_hit=%.2f%% swaps=%d",
+                self.replay_steps, len(self.owner_slot), hit_rate * 100,
+                self.total_swaps,
+            )
 
     def _collect_stats(self) -> float:
         window_total = window_miss = 0

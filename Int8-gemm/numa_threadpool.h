@@ -112,6 +112,12 @@ public:
         // 2. 主线程等待的计数器
         alignas(CACHE_LINE_SIZE) std::atomic<int> remaining_{0};
 
+        // Worker startup barrier.  The first dispatch must not advance gen_
+        // until every worker has captured its initial generation; otherwise a
+        // late-starting worker can mistake the first job generation for its
+        // baseline and sleep forever while remaining_ never reaches zero.
+        alignas(CACHE_LINE_SIZE) std::atomic<int> ready_{0};
+
         // 3. 动态调度时的任务游标 (Worker 间高频竞争)
         alignas(CACHE_LINE_SIZE) std::atomic<int64_t> next_{0};
 
@@ -149,6 +155,11 @@ public:
         workers_.reserve((size_t)num_threads_);
         for (int tid = 0; tid < num_threads_; ++tid) {
             workers_.emplace_back([this, tid]() { worker_loop(tid); });
+        }
+        int ready;
+        while ((ready = cb_->ready_.load(std::memory_order_acquire))
+               < num_threads_) {
+            detail::FutexImpl::wait(cb_->ready_, ready);
         }
     }
 
@@ -304,6 +315,10 @@ private:
         tls_tid_ = tid;
 
         uint32_t my_gen = cb_->gen_.load(std::memory_order_acquire);
+        if (cb_->ready_.fetch_add(1, std::memory_order_acq_rel) + 1
+                == num_threads_) {
+            detail::FutexImpl::notify_one(cb_->ready_);
+        }
 
         while (true) {
             detail::FutexImpl::wait(cb_->gen_, my_gen);
