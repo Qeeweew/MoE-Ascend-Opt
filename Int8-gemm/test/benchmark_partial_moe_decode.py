@@ -41,17 +41,28 @@ def make_handle(experts: int, hidden: int, intermediate: int):
     return handle
 
 
-def make_case(hidden: int, experts: int, top_k: int, cpu_routes: int, variant: int):
-    x = torch.randn(1, hidden, dtype=torch.float16).contiguous()
-    ids = torch.full((1, top_k), -1, dtype=torch.int32)
+def make_case(
+    hidden: int,
+    experts: int,
+    top_k: int,
+    tokens: int,
+    cpu_routes: int,
+    variant: int,
+    routing_experts: int,
+):
+    x = torch.randn(tokens, hidden, dtype=torch.float16).contiguous()
+    ids = torch.full((tokens, top_k), -1, dtype=torch.int32)
     # Rotate through the real expert pool instead of repeatedly benchmarking
     # the same eight hot experts.  A real decode step visits 48 different MoE
     # layers, so keeping a tiny eight-expert handle unrealistically favours the
     # CPU cache hierarchy.
-    base = (variant * top_k) % experts
-    routed = (torch.arange(top_k, dtype=torch.int32) + base) % experts
-    ids[0, :cpu_routes] = routed[:cpu_routes]
-    weights = torch.full((1, top_k), 1.0 / top_k, dtype=torch.float32)
+    for token in range(tokens):
+        base = ((variant * tokens + token) * top_k) % routing_experts
+        routed = (
+            torch.arange(top_k, dtype=torch.int32) + base
+        ) % routing_experts
+        ids[token, :cpu_routes] = routed[:cpu_routes]
+    weights = torch.full((tokens, top_k), 1.0 / top_k, dtype=torch.float32)
     return x, ids, weights
 
 
@@ -72,7 +83,19 @@ def main():
     parser.add_argument("--hidden", type=int, default=2048)
     parser.add_argument("--intermediate", type=int, default=768)
     parser.add_argument("--experts", type=int, default=128)
+    parser.add_argument(
+        "--routing-experts",
+        type=int,
+        help="expert-id pool used by routes; smaller values create cross-token collisions",
+    )
     parser.add_argument("--top-k", type=int, default=8)
+    parser.add_argument("--tokens", type=int, nargs="+", default=[1])
+    parser.add_argument(
+        "--cpu-routes",
+        type=int,
+        nargs="+",
+        help="CPU miss routes per token (default: every value from 0 to top-k)",
+    )
     parser.add_argument("--variants", type=int, default=16)
     parser.add_argument("--warmup", type=int, default=4)
     parser.add_argument("--runs", type=int, default=200)
@@ -83,74 +106,100 @@ def main():
     torch.manual_seed(0)
     if args.experts < args.top_k:
         parser.error("--experts must be >= --top-k")
+    routing_experts = args.routing_experts or args.experts
+    if routing_experts < args.top_k or routing_experts > args.experts:
+        parser.error("--routing-experts must be between top-k and experts")
     if args.variants <= 0 or args.runs <= 0:
         parser.error("--variants and --runs must be positive")
+    if any(tokens <= 0 for tokens in args.tokens):
+        parser.error("--tokens values must be positive")
+    route_counts = args.cpu_routes or list(range(0, args.top_k + 1))
+    if any(routes < 0 or routes > args.top_k for routes in route_counts):
+        parser.error("--cpu-routes values must be between 0 and top-k")
 
     handle = make_handle(args.experts, args.hidden, args.intermediate)
     cases = {
-        cpu_routes: [
-            make_case(args.hidden, args.experts, args.top_k, cpu_routes, variant)
+        (tokens, cpu_routes): [
+            make_case(
+                args.hidden,
+                args.experts,
+                args.top_k,
+                tokens,
+                cpu_routes,
+                variant,
+                routing_experts,
+            )
             for variant in range(args.variants)
         ]
-        for cpu_routes in range(0, args.top_k + 1)
+        for tokens in args.tokens
+        for cpu_routes in route_counts
     }
 
     # Warm every shape before timing, then interleave route counts in a
     # deterministic shuffled order. This avoids measuring 0..TopK under
     # systematically different thread-pool/cache states.
-    for cpu_routes in range(0, args.top_k + 1):
-        for x, ids, weights in cases[cpu_routes]:
+    for key in cases:
+        for x, ids, weights in cases[key]:
             for _ in range(args.warmup):
                 torch.ops.nanovllm.moe_forward(x, ids, weights, handle)
 
-    wall_samples = {cpu_routes: [] for cpu_routes in cases}
-    compute_samples = {cpu_routes: [] for cpu_routes in cases}
+    wall_samples = {key: [] for key in cases}
+    compute_samples = {key: [] for key in cases}
     order = list(cases)
     for run_idx in range(args.runs):
         random.shuffle(order)
-        for cpu_routes in order:
-            x, ids, weights = cases[cpu_routes][run_idx % args.variants]
+        for key in order:
+            x, ids, weights = cases[key][run_idx % args.variants]
             begin = time.perf_counter_ns()
             torch.ops.nanovllm.moe_forward(x, ids, weights, handle)
-            wall_samples[cpu_routes].append((time.perf_counter_ns() - begin) / 1e6)
-            compute_samples[cpu_routes].append(handle.get_last_run_time_ms())
+            wall_samples[key].append((time.perf_counter_ns() - begin) / 1e6)
+            compute_samples[key].append(handle.get_last_run_time_ms())
 
     results = {}
     rows = []
-    print("cpu_routes  compute_p50_ms  compute_p95_ms  wall_p50_ms  median_95%_ci")
-    for cpu_routes in range(0, args.top_k + 1):
-        compute = compute_samples[cpu_routes]
-        wall = wall_samples[cpu_routes]
-        median = statistics.median(compute)
-        ci_low, ci_high = bootstrap_ci(compute, seed=cpu_routes)
-        results[cpu_routes] = median
-        print(
-            f"{cpu_routes:>10}  {median:>14.4f}  {percentile(compute, 95):>14.4f}  "
-            f"{statistics.median(wall):>11.4f}  [{ci_low:.4f}, {ci_high:.4f}]"
-        )
-        rows.append({
-            "cpu_routes": cpu_routes,
-            "compute_median_ms": median,
-            "compute_mean_ms": statistics.mean(compute),
-            "compute_p95_ms": percentile(compute, 95),
-            "compute_median_ci95_ms": [ci_low, ci_high],
-            "wall_median_ms": statistics.median(wall),
-            "wall_p95_ms": percentile(wall, 95),
-        })
+    print("tokens  cpu_routes/token  compute_p50_ms  compute_p95_ms  wall_p50_ms  median_95%_ci")
+    for tokens in args.tokens:
+        for cpu_routes in route_counts:
+            key = (tokens, cpu_routes)
+            compute = compute_samples[key]
+            wall = wall_samples[key]
+            median = statistics.median(compute)
+            ci_low, ci_high = bootstrap_ci(compute, seed=tokens * 100 + cpu_routes)
+            results[key] = median
+            print(
+                f"{tokens:>6}  {cpu_routes:>16}  {median:>14.4f}  "
+                f"{percentile(compute, 95):>14.4f}  "
+                f"{statistics.median(wall):>11.4f}  [{ci_low:.4f}, {ci_high:.4f}]"
+            )
+            rows.append({
+                "tokens": tokens,
+                "cpu_routes_per_token": cpu_routes,
+                "compute_median_ms": median,
+                "compute_mean_ms": statistics.mean(compute),
+                "compute_p95_ms": percentile(compute, 95),
+                "compute_median_ci95_ms": [ci_low, ci_high],
+                "wall_median_ms": statistics.median(wall),
+                "wall_p95_ms": percentile(wall, 95),
+            })
     drop = None
-    if args.top_k >= 1 and results.get(args.top_k, 0.0) > 0:
-        full = results[args.top_k]
-        minus_one = results[args.top_k - 1]
+    if len(args.tokens) == 1 and args.top_k in route_counts and args.top_k - 1 in route_counts:
+        tokens = args.tokens[0]
+        full = results[(tokens, args.top_k)]
+        minus_one = results[(tokens, args.top_k - 1)]
         drop = (full - minus_one) / full * 100.0
         print(
             f"\nTopK->{args.top_k - 1} drop: {drop:.2f}% "
             f"(ideal one-route share: {100.0 / args.top_k:.2f}%)"
         )
 
-    fixed = results[0]
-    incremental = {routes: max(0.0, value - fixed) for routes, value in results.items()}
+    first_tokens = args.tokens[0]
+    fixed = results.get((first_tokens, 0), 0.0)
+    incremental = {
+        routes: max(0.0, results[(first_tokens, routes)] - fixed)
+        for routes in route_counts
+    }
     incremental_drop = None
-    if incremental[args.top_k] > 0:
+    if args.top_k in incremental and args.top_k - 1 in incremental and incremental[args.top_k] > 0:
         incremental_drop = (
             (incremental[args.top_k] - incremental[args.top_k - 1])
             / incremental[args.top_k] * 100.0

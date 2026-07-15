@@ -21,7 +21,7 @@ def _add_moe_offload_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--moe-expert-cache-size", type=int, default=256)
     parser.add_argument(
         "--moe-expert-cache-swap-per-update", type=int, default=8,
-        help="Maximum bootstrap fills per update; steady replacement is capped at 8.",
+        help="NPU spare slots and maximum replacement batch; full-cache replacement is capped at 8.",
     )
     parser.add_argument("--moe-expert-cache-update-interval", type=int, default=16)
     parser.add_argument("--moe-expert-cache-warmup-steps", type=int, default=16)

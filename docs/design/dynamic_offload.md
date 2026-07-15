@@ -16,14 +16,14 @@
 - `fused_moe_w4a16_cached` 使用 slot id 索引固定 cache，`-1` 在 kernel 内安全跳过。
 - CPU partial 路径把 NPU hit 对应的 expert id 改成 `-1`，复用 MoEInfer 已有的无效路由过滤，不重复计算命中专家。
 - graph callback 同时接收原始 routing ids，按真实 token 数排除 graph padding 后累计频率。
-- `ExpertCacheManager` 跨层维护固定 cache、slot table、滑动窗口 LFU、10% 替换滞回和备用 slot。
+- `ExpertCacheManager` 跨层维护固定 cache、slot table、decode route 窗口 LFU、10% 替换滞回和备用 slot。
 - SGLang `CudaGraphRunner.replay` 通过 monkey patch 提供图外 step 边界；每次发布均排在下一次 replay 之前，不 recapture graph。
 - Ascend 实际使用覆盖通用实现的 `NPUGraphRunner.replay`，实现同时 patch 两个 runner，避免 NPU 路径绕过控制器。
 - decode 小 batch 的 CPU remainder 已专门优化：全 miss 保持原 2×TopK 线程预算；只要有 NPU hit，CPU 将 NUMA 节点线程预算重分配给剩余 miss experts，使“少一个 CPU expert”能转化成 wall latency 下降。
 
 首版交付边界是 Qwen3 compressed-tensors 对称 Int4、TP=1。多 rank 的统一决策与 delta broadcast 留作后续扩展。
 
-固定 prompt 实验曾观察到 K=256 为 41.29 tok/s、相对 CPU Q4 的 38.57 tok/s 提升约 7.1%，K=512 为 44.37 tok/s。该结果来自重复相同 prompt 的稳态特例，K=256 命中率约 38.3%，不能泛化到真实多请求分布。2026-07-13 的同 seed、同 32 条 ShareGPT matched A/B 中，CPU Q4 为 37.79 tok/s，K=256 为 37.05 tok/s（-1.96%），平均窗口命中率仅约 13.1%。因此 K=256 当前只是实验默认点，尚不能称为通用正收益配置。完整记录见 `docs/bench_results/dynamic_expert_cache_qwen3.md`。
+固定 prompt 的稳态结果不能代表真实多请求分布；缓存容量和更新策略必须以目标模型、并发度与请求集的可复现实验为准，不能将单一工作负载的命中率或吞吐外推为通用收益。
 
 固定 prompt 复现实验由 `moe_ascend_npu/tests/benchmark_expert_cache_prompt.py` 自动完成，输出每个 cache size 的请求延迟、输出 hash、cache hit window、更新退避和 local decode throughput。
 
@@ -76,15 +76,16 @@ slot_table: [num_layers, num_experts] int32   # NPU tensor，原地更新
 
 反向索引 `slot_owner: [K] -> (layer, expert)` 仅在 CPU 侧 Python 维护，用于替换决策，不进图。
 
-### 2.3 频率统计（滑动窗口 LFU）
+### 2.3 路由频率统计（滑动窗口 LFU）
 
 ```
-freq: [num_layers, num_experts] float32  # CPU tensor
-      每 step 累加该层各 expert 的激活次数（按 topk_ids 统计）
-      滑动窗口衰减（如 freq = 0.95*freq + new_count）
+route_freq: [num_layers, num_experts] float32
+      累计 decode route 次数，做滑动窗口衰减
+      （如 freq = 0.95*freq + new_count）
 ```
 
-用于替换决策：找出高频未缓存（换入候选）与低频已缓存（换出候选）。
+route frequency 直接反映某个 expert-instance 被路由的次数。gate score 不会减少
+必须执行的专家任务，因此不进入缓存评分。
 
 ### 2.4 CPU 全量后备
 
@@ -150,11 +151,13 @@ out[i] = Σ_{k, hit}  w[i,k]·Expert(x[i])    # NPU 算
 
 ## 4. 缓存替换（图外，step 边界）
 
-替换由 `CudaGraphRunner.replay` 的外部 hook 在低频更新周期执行，不改变当前捕获图。CPU 路由计数通过内部 mutex 获取一致快照（尚未完成的 callback 自然计入下一窗口），不做全设备同步；repack、copy 和 table 更新顺序提交到主 NPU stream：
+服务初始化时先按层均匀填满 K 个活动 slot：每层获得 `floor(K/L)` 或 `ceil(K/L)` 个位置，余数分散到全深度；层内使用固定 seed 的确定性洗牌选择 expert，避免低编号偏置。该过程在 KV Cache 规划前完成，不进入请求 TTFT，也不计入运行期 swap 指标。
+
+运行期替换只由 decode 驱动。Graph decode 由 `CudaGraphRunner.replay` 的外部 hook 执行，eager decode 在首个 MoE 层进入前执行同一控制逻辑；Prefill 可以读取现有缓存，命中走 NPU、未命中走 CPU，但不记录热度、不触发替换。CPU 路由计数通过内部 mutex 获取一致快照（尚未完成的 callback 自然计入下一窗口），不做全设备同步；repack、copy 和 table 更新顺序提交到主 NPU stream：
 
 ```
 每个更新周期、下一次 replay 前（图外）：
-  (1) 统计：freq[layer] += topk_ids 的直方图（衰减后）
+  (1) 统计：每个 expert 的 decode route 次数
   (2) 决策：找出换入候选（高频未缓存）与换出候选（低频已缓存）
   (3) 执行（NPU stream，使用备用 slot）：
       for (layer, expert) in 换入:
@@ -175,8 +178,11 @@ out[i] = Σ_{k, hit}  w[i,k]·Expert(x[i])    # NPU 算
 
 ### 4.2 替换粒度与频率
 
-- 每次 step 最多换 M 个专家（M 小，如 4-8），控制 H2D 带宽开销。
-- 启动填充按配置周期执行；缓存满载后更新周期先放大 8 倍。若连续两个稳态窗口没有替换，周期继续按 2 倍退避，最高 32 倍；一旦发生替换或窗口命中率明显下滑，恢复到 8 倍。这样保留动态自适应能力，同时避免无效统计成为 decode 固定开销。
+- 每个基础 decode 窗口最多换 `min(swap_per_update, 8)` 个专家，控制 H2D 带宽开销。
+- 缓存启动时已经均匀满载，运行期替换只是细化而不是 bootstrap。控制器按
+  decode route LFU 和 10% admission hysteresis 每次最多替换 8 个；满载后的更新
+  周期从基础值的 8 倍开始，无替换时继续退避，减少控制面开销。Prefill 不参与
+  统计和替换。
 - 每个 expert 权重 ≈ 3MB（Qwen3-30B TP2 下），H2D 3MB ≈ 0.3ms（PCIe ~10GB/s），M=8 ≈ 2.4ms，可在 step 间隙吸收。
 - 替换是**分钟级低频**事件的细粒度版——稳态下命中率稳定后替换率趋近 0。
 
@@ -189,7 +195,7 @@ out[i] = Σ_{k, hit}  w[i,k]·Expert(x[i])    # NPU 算
 | 1 | NPU kernel 支持 slot 索引 + miss 跳过 | `csrc/op_host/grouped_gemv_w4a16_moe.cpp` + kernel | 新增 `fused_moe_w4a16_cached`：入参 `slot_ids`（-1 表 miss）替代 `expert_ids`，权重张量改为 cache buffer `[K,...]`，kernel 内 `if (slot<0) continue` |
 | 2 | CPU partial + routing telemetry | `Int8-gemm/` | 图内把 hit 路由改为 `-1`，复用现有无效 ID 过滤；graph callback 额外统计原始 routing ids |
 | 3 | 新建 `ExpertCache` | `moe_ascend_npu/cache.py`（新） | 持 cache buffer + slot_table + 频率统计；提供 `get_slot_table_layer(l)` / `swap_in(layer, expert)` / `record_routing(layer, topk_ids)` |
-| 4 | 新建 `CacheController` | `moe_ascend_npu/cache.py`（新） | 单例，按更新窗口做 LFU 决策，在 graph replay 边界发布替换 |
+| 4 | 新建 `CacheController` | `moe_ascend_npu/cache.py`（新） | 单例，按 decode route 窗口做 LFU，在 graph replay 边界发布替换 |
 | 5 | 双路径 `apply` | `moe_ascend_npu/patches/expert_cache_method.py`（新） | 替换现有 `fused_moe_method` 的 apply：gather slot_ids → CPU side stream 提交 partial → NPU cached kernel → join/add |
 | 6 | 接入 sglang MoE 层 | `patches/moe_layer.py` | cache 打开时所有 MoE 层装 `ExpertCacheFusedMoEMethod`，共同竞争同一个全局 expert pool |
 | 7 | CLI 参数 | `patches/server_args.py` | `--moe-expert-cache-size K`、`--moe-expert-cache-swap-per-step M`、`--moe-expert-cache-decay 0.95` |
@@ -268,7 +274,7 @@ cpu_ids = where(hit_mask, -1, topk_ids)
 
 3. **TP 一致性**：多卡下各 rank 的缓存内容必须一致（同一 (layer,expert) 要么全卡命中要么全卡 miss），否则 TP 通信错乱。Controller 决策在 rank-0，broadcast slot_table delta 给所有 rank。
 
-4. **prefill vs decode 路由差异**：prefill 大 bs 与 decode 小 bs 的 routing 分布可能不同。缓存若按 decode 统计填充，prefill 时命中率可能下降。缓解：prefill 强制全走 CPU（反正 prefill 大 bs CPU 也扛得住），或独立统计。
+4. **prefill vs decode 路由差异**：prefill 大 bs 与 decode 小 bs 的 routing 分布可能不同。当前只用 decode 路由更新缓存，避免一次 Prefill 的分布变化触发大规模换入；Prefill 仍可消费现有缓存，但其路由不会改变缓存内容。
 
 5. **swap-in 的 repack 开销**：CPU store 是 q4_0 格式，NPU cache 是 W4A16 格式，swap-in 需 repack。repack 在 CPU 端做（`repack_int4_npu`）再 H2D，还是 H2D 原始格式再 NPU 上 repack，P3 实测择优。
 

@@ -29,13 +29,7 @@ def _npu_grouped_moe_cached_hits(
     w2: torch.Tensor,
     s2: torch.Tensor,
 ) -> torch.Tensor:
-    """Run only cache-hit prefill routes with the original NPU grouped GEMM.
-
-    Each selected token/expert route becomes one ``top_k=1`` input row.  This
-    avoids sending misses to a dummy cache slot (which would still execute a
-    full expert GEMM) while preserving the official NPU MoE sequence:
-    init-routing, grouped matmul, SwiGLU, grouped matmul, finalize-routing.
-    """
+    """Run cache-hit prefill routes with the original NPU grouped GEMM."""
     hit_mask = slot_ids >= 0
     token_ids = (
         torch.arange(
@@ -185,10 +179,9 @@ class ExpertCacheFusedMoEMethod(MoEOffloadInt4FusedMoEMethod):
 
         main_stream = torch_npu.npu.current_stream()
         if get_is_extend_in_batch():
-            # Prefill keeps the official torch_npu grouped-GEMM implementation.
-            # A start callback dispatches CPU misses and immediately returns;
-            # grouped GEMM computes compacted cache-hit routes while CPU workers
-            # are active; the second callback joins and copies the CPU result.
+            # Prefill consumes the existing cache without training the decode
+            # policy: hits run on NPU and misses run on CPU, while telemetry
+            # and replacement remain disabled.
             _get_or_create_global_callback_manager(int(main_stream.npu_stream))
             num_tokens, top_k = int(x.shape[0]), int(topk_ids.shape[1])
             dtype_int = 1 if x.dtype == torch.bfloat16 else 0
@@ -197,7 +190,7 @@ class ExpertCacheFusedMoEMethod(MoEOffloadInt4FusedMoEMethod):
             )
             torch.ops.nanovllm.moe_forward_npu_graph_partial_start(
                 x, cpu_ids, topk_ids, topk_weights,
-                self.moe_infer_handle, ctx,
+                self.moe_infer_handle, ctx, False,
             )
             npu_out = _npu_grouped_moe_cached_hits(
                 x, slot_ids, topk_weights,
@@ -229,7 +222,7 @@ class ExpertCacheFusedMoEMethod(MoEOffloadInt4FusedMoEMethod):
             cpu_out = torch.empty_like(x)
             torch.ops.nanovllm.moe_forward_npu_graph_partial_start(
                 x, cpu_ids, topk_ids, topk_weights,
-                self.moe_infer_handle, ctx,
+                self.moe_infer_handle, ctx, True,
             )
             npu_out = torch.ops.moe_ascend_npu.fused_moe_w4a16_cached(
                 x,
@@ -249,6 +242,12 @@ class ExpertCacheFusedMoEMethod(MoEOffloadInt4FusedMoEMethod):
             self.input_ready = torch_npu.npu.Event()
             self.cpu_done = torch_npu.npu.Event()
             _get_or_create_global_callback_manager(int(self.cpu_stream.npu_stream))
+
+        if self.layer_idx == min(self.cache_manager.sources):
+            # This branch is decode without graph replay.  Drive the same
+            # decode-only controller here; Prefill returned above and never
+            # enters routing telemetry or replacement.
+            self.cache_manager.before_replay(int(x.shape[0]))
 
         self.input_ready.record(main_stream)
         with torch_npu.npu.stream(self.cpu_stream):

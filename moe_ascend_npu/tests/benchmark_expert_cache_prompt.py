@@ -2,7 +2,7 @@
 """Fixed-prompt expert-cache sweep for Qwen3 small-cache experiments.
 
 This script reproduces the measurement used in
-``docs/bench_results/dynamic_expert_cache_qwen3.md``:
+the dynamic expert-cache evaluation workflow:
 
 * launch one SGLang server per mode;
 * keep NPU graph enabled with BS 1/2/4/8;

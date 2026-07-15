@@ -55,6 +55,53 @@ class _LayerSource:
     scale_dtype: torch.dtype
 
 
+_MASK64 = (1 << 64) - 1
+_SEED_GAMMA = 0x9E3779B97F4A7C15
+
+
+def _splitmix64(state: int) -> Tuple[int, int]:
+    """Return the next deterministic 64-bit value and generator state."""
+    state = (state + _SEED_GAMMA) & _MASK64
+    value = state
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _MASK64
+    return value ^ (value >> 31), state
+
+
+def _uniform_seed_owners(
+    layer_indices, num_experts: int, cache_size: int
+) -> list[Tuple[int, int]]:
+    """Choose exactly K expert instances with an even per-layer allocation."""
+    layers = sorted(int(layer) for layer in layer_indices)
+    if not layers:
+        raise ValueError("cannot seed an expert cache without MoE layers")
+    if num_experts <= 0:
+        raise ValueError("num_experts must be positive")
+    if cache_size < 0 or cache_size > len(layers) * num_experts:
+        raise ValueError(
+            f"cache size {cache_size} exceeds {len(layers) * num_experts} "
+            "registered expert instances"
+        )
+
+    per_layer, remainder = divmod(cache_size, len(layers))
+    owners: list[Tuple[int, int]] = []
+    for position, layer in enumerate(layers):
+        # The floor-difference spreads the remainder across the whole depth;
+        # it does not concentrate all extra slots in the first layers.
+        quota = per_layer + (
+            ((position + 1) * remainder) // len(layers)
+            - (position * remainder) // len(layers)
+        )
+        experts = list(range(num_experts))
+        state = (0xD1B54A32D192ED03 ^ (layer * _SEED_GAMMA)) & _MASK64
+        for index in range(num_experts - 1, 0, -1):
+            value, state = _splitmix64(state)
+            selected = value % (index + 1)
+            experts[index], experts[selected] = experts[selected], experts[index]
+        owners.extend((layer, expert) for expert in experts[:quota])
+    return owners
+
+
 class ExpertCacheManager:
     """Own fixed cache tensors, routing EMA, and graph-boundary replacement."""
 
@@ -84,6 +131,7 @@ class ExpertCacheManager:
         self._batch_staging: Optional[Tuple[torch.Tensor, ...]] = None
         self._batch_staging_event = None
         self._batch_staging_inflight = False
+        self._uniform_initialized = False
         self.replay_steps = 0
         self.started = False
         self.total_routes = 0
@@ -169,6 +217,12 @@ class ExpertCacheManager:
                 raise RuntimeError("expert cache has no registered MoE layers")
             first = self.sources[min(self.sources)]
             num_experts = first.num_experts
+            capacity = len(self.sources) * num_experts
+            if self.config.size > capacity:
+                raise ValueError(
+                    f"expert cache size {self.config.size} exceeds {capacity} "
+                    "registered expert instances"
+                )
             num_layers = max(self.sources) + 1
             physical = self.config.size + self.config.swap_per_update
             device = torch.device("npu", torch.npu.current_device())
@@ -238,6 +292,105 @@ class ExpertCacheManager:
                 slot_bytes / 2**20, physical * slot_bytes / 2**30,
             )
 
+    def initialize_uniform(self, batch_size: int = 64) -> None:
+        """Populate all active slots evenly across layers before serving."""
+        if not self.enabled or self._uniform_initialized:
+            return
+        self.ensure_allocated()
+        with self._lock:
+            if self._uniform_initialized:
+                return
+            if self.owner_slot:
+                raise RuntimeError("expert cache is already partially populated")
+
+            first = self.sources[min(self.sources)]
+            owners = _uniform_seed_owners(
+                self.sources, first.num_experts, self.config.size
+            )
+            if len(owners) != self.config.size:
+                raise RuntimeError("uniform expert-cache seed has the wrong size")
+
+            started_ns = time.perf_counter_ns()
+            slot_table_host = torch.full(
+                self.slot_table.shape,
+                -1,
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=True,
+            )
+
+            if self._cpp_scheduler is not None:
+                batch = min(max(int(batch_size), 1), self.config.size)
+                hidden = first.hidden_size
+                intermediate = first.intermediate_size
+                plan_buffer = torch.empty(batch, 5, dtype=torch.int64, device="cpu")
+                staging = (
+                    torch.empty(batch, hidden, 2 * intermediate // 8,
+                                dtype=torch.int32, device="cpu", pin_memory=True),
+                    torch.empty(batch, hidden // 32, 2 * intermediate,
+                                dtype=first.scale_dtype, device="cpu", pin_memory=True),
+                    torch.empty(batch, intermediate, hidden // 8,
+                                dtype=torch.int32, device="cpu", pin_memory=True),
+                    torch.empty(batch, intermediate // 32, hidden,
+                                dtype=first.scale_dtype, device="cpu", pin_memory=True),
+                )
+                copy_done = torch.npu.Event()
+                copy_inflight = False
+
+                for start in range(0, len(owners), batch):
+                    if copy_inflight:
+                        copy_done.synchronize()
+                    current = owners[start:start + batch]
+                    count = len(current)
+                    rows = [
+                        (layer, expert, start + row, -1, -1)
+                        for row, (layer, expert) in enumerate(current)
+                    ]
+                    plan_buffer[:count].copy_(torch.tensor(rows, dtype=torch.int64))
+                    plan = plan_buffer[:count]
+                    self._cpp_scheduler.seed_uniform(plan)
+                    current_staging = tuple(tensor[:count] for tensor in staging)
+                    self._cpp_scheduler.export_plan_out(plan, *current_staging)
+
+                    stop = start + count
+                    self.w13_cache[start:stop].copy_(current_staging[0], non_blocking=True)
+                    self.s13_cache[start:stop].copy_(current_staging[1], non_blocking=True)
+                    self.w2_cache[start:stop].copy_(current_staging[2], non_blocking=True)
+                    self.s2_cache[start:stop].copy_(current_staging[3], non_blocking=True)
+                    copy_done.record(torch.npu.current_stream())
+                    copy_inflight = True
+
+                    for row, owner in enumerate(current):
+                        slot = start + row
+                        layer, expert = owner
+                        self.owner_slot[owner] = slot
+                        self.slot_owner[slot] = owner
+                        slot_table_host[layer, expert] = slot
+            else:
+                # Raw route tracing keeps the Python policy.  It still receives
+                # the same deterministic initial owners, but exports one expert
+                # at a time through its existing pinned staging ring.
+                for slot, owner in enumerate(owners):
+                    self._load_owner_into_slot(owner, slot)
+                    self.owner_slot[owner] = slot
+                    self.slot_owner[slot] = owner
+                    slot_table_host[owner[0], owner[1]] = slot
+
+            self.slot_table.copy_(slot_table_host, non_blocking=True)
+            torch.npu.synchronize()
+            self._uniform_initialized = True
+
+            layer_counts = {layer: 0 for layer in self.sources}
+            for layer, _ in owners:
+                layer_counts[layer] += 1
+            elapsed_s = (time.perf_counter_ns() - started_ns) / 1e9
+            logger.info(
+                "[ExpertCache] initialized %d experts uniformly before serving "
+                "(layers=%d per_layer=%d..%d elapsed=%.2fs)",
+                len(owners), len(layer_counts), min(layer_counts.values()),
+                max(layer_counts.values()), elapsed_s,
+            )
+
     def reset_capture_stats(self) -> None:
         if self._cpp_scheduler is not None:
             self._cpp_scheduler.reset_routing_stats()
@@ -250,6 +403,7 @@ class ExpertCacheManager:
         if not self.enabled:
             return
         self.ensure_allocated()
+        self.initialize_uniform()
         if self._cpp_scheduler is not None:
             self._before_replay_cpp(int(valid_tokens))
             return

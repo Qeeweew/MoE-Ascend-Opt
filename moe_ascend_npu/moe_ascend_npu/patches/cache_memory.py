@@ -3,8 +3,8 @@
 The cache tensors must exist before ``ModelRunner.init_memory_pool`` measures
 available HBM.  Deferring allocation to the first MoE forward lets SGLang give
 that capacity to the KV pool, then fails during graph capture when the cache is
-first touched.  Cache *population* remains deferred until routing warmup; only
-the fixed tensor addresses are established here.
+first touched.  The cache is also populated here with a deterministic uniform
+per-layer seed, so requests never pay the cost of filling an empty cache.
 """
 
 from sglang.srt.utils import logger
@@ -27,8 +27,10 @@ def apply():
                 # graph-address-stable tensor now, before SGLang samples free
                 # HBM and commits the KV pool size.
                 manager.ensure_allocated()
+                manager.initialize_uniform()
                 logger.info(
-                    "[ExpertCache] fixed HBM reservation completed before KV Cache allocation"
+                    "[ExpertCache] fixed HBM reservation and uniform seed completed "
+                    "before KV Cache allocation"
                 )
         return original_init_memory_pool(self, *args, **kwargs)
 

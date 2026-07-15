@@ -6,7 +6,11 @@ import re
 
 import torch
 
-from moe_ascend_npu.cache import ExpertCacheConfig, ExpertCacheManager
+from moe_ascend_npu.cache import (
+    ExpertCacheConfig,
+    ExpertCacheManager,
+    _uniform_seed_owners,
+)
 from moe_ascend_npu.patches.server_args import _add_moe_offload_args
 
 
@@ -74,6 +78,36 @@ def test_config_validation():
             raise AssertionError(f"invalid config accepted: {config}")
 
 
+def test_uniform_seed_fills_k_and_spreads_remainder_across_layers():
+    owners = _uniform_seed_owners(range(62), num_experts=256, cache_size=3072)
+    assert len(owners) == 3072
+    assert len(set(owners)) == 3072
+
+    counts = {layer: 0 for layer in range(62)}
+    for layer, expert in owners:
+        assert 0 <= expert < 256
+        counts[layer] += 1
+    assert set(counts.values()) == {49, 50}
+    assert sum(count == 50 for count in counts.values()) == 34
+
+    extra_layers = [layer for layer, count in counts.items() if count == 50]
+    assert extra_layers != list(range(34))
+    assert min(extra_layers) < 10
+    assert max(extra_layers) > 50
+    assert owners == _uniform_seed_owners(
+        range(62), num_experts=256, cache_size=3072
+    )
+
+
+def test_uniform_seed_rejects_capacity_overflow():
+    try:
+        _uniform_seed_owners([0, 1], num_experts=4, cache_size=9)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("uniform seed accepted more slots than expert instances")
+
+
 def test_large_fill_batch_is_capped_after_full():
     manager = ExpertCacheManager(
         ExpertCacheConfig(size=2, swap_per_update=64, update_interval=1, warmup_steps=0)
@@ -89,7 +123,6 @@ def test_large_fill_batch_is_capped_after_full():
     manager.freq[0].add_(100)
     manager._rebalance()
     assert manager.total_swaps - before <= 8
-
 
 def test_global_lfu_competes_across_layers():
     manager = ExpertCacheManager(
@@ -130,10 +163,11 @@ def test_steady_interval_backoff_and_reset():
     manager._update_interval_backoff(hit_rate=0.20, swaps=0)
     assert manager._steady_interval_multiplier == 8
 
-
 if __name__ == "__main__":
     test_fill_then_replace_with_hysteresis()
     test_config_validation()
+    test_uniform_seed_fills_k_and_spreads_remainder_across_layers()
+    test_uniform_seed_rejects_capacity_overflow()
     test_large_fill_batch_is_capped_after_full()
     test_global_lfu_competes_across_layers()
     test_steady_interval_backoff_and_reset()

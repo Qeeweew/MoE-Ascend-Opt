@@ -1,195 +1,157 @@
-***
+# MoE-Ascend-Opt
 
-# MoE-Ascend-Opt: 面向国产异构平台的混合专家模型推理优化
+面向昇腾 NPU 与鲲鹏 CPU 的 MoE 推理优化工程。项目在不修改上游 SGLang 和
+`sgl-kernel-npu` 源码的前提下，通过 `moe_ascend_npu` 独立包、运行时 monkey
+patch 与 `.pth` 自动注入接入优化能力。
 
-![Platform](https://img.shields.io/badge/Platform-Huawei%20Ascend%20910B%20%2B%20Kunpeng%20920-red)
-![Model](https://img.shields.io/badge/Model-Qwen3%20%2F%20MiniMax%20M2%20MoE-blue)
-![Quantization](https://img.shields.io/badge/Quantization-AWQ%20W4A16%20%2F%20Int8%20%2F%20Int4-green)
+当前重点是**专家粒度动态卸载**：在固定 NPU 显存预算内缓存高频
+`(layer, expert)` 实例，命中时使用 NPU W4A16 kernel，未命中时由 CPU Q4_0
+后备计算。它不是 KV Cache 卸载，缓存容量在启动时固定，运行中只替换 slot 内容。
 
-**MoE-Ascend-Opt** 是一个针对国产异构计算平台（华为昇腾 910B NPU + 鲲鹏 920 CPU）的混合专家模型（MoE）推理优化项目。
+## 能力概览
 
-本项目旨在解决 MoE 模型在边缘计算或单卡部署场景下的**显存带宽瓶颈**与**容量限制**问题。通过在 NPU 端实现基于 Vector Core 的极致 W4A16 算子，以及在 CPU 端实现基于 ARM NEON 的高性能 Int8/Int4 算子，构建了一套”计算向数据靠拢”的动态异构推理系统。
-
-> **背景**: 本项目隶属于课题《面向国产异构平台的混合专家模型推理优化与动态卸载机制研究》。
-
----
-
-## 🔬 核心技术原理 (Core Principles)
-
-### 1. NPU 端：基于 Vector Core 的 W4A16 融合算子
-**痛点**：MoE 推理的 Decoding 阶段（Batch Size 通常为 1~8）具有极高的稀疏性。昇腾 NPU 的 **Cube Core**（矩阵乘法单元）专为大规模稠密矩阵设计，在处理此类“碎片化、小形状”的 GEMV（矩阵-向量乘）任务时，填充（Padding）开销巨大，且无法充分利用显存带宽。
-
-**优化原理**：
-*   **Vector Core (AIV) 替代 Cube Core**：
-    我们放弃通用的 `matmul` 接口，使用 **Ascend C** 编写自定义算子，利用 **Vector Core** 直接处理 GEMV 任务。对于 Batch=1 的场景，Vector 单元的流水线效率远高于 Cube 单元的调度开销。
-*   **寄存器级反量化 (Register-Level Dequantization)**：
-    *   *传统流程*：`Load Int4 (GM)` -> `Convert to FP16` -> `Store FP16 (GM)` -> `Load FP16 (GM)` -> `Compute`。这导致了严重的显存读写浪费。
-    *   *本项目流程*：`Load Int4 (GM)` -> `Deqant to FP16 (Vector Reg)` -> `FMA (Vector Reg)`。
-    *   权重数据从全局内存（Global Memory）加载后，直接在**寄存器**中完成 Int4 到 FP16 的转换并立即参与计算，消除了所有中间数据的显存读写，将带宽利用率（MBU）提升至硬件极限。
-*   **垂直算子融合 (Vertical Fusion)**：
-    将 MoE MLP 的全流程 `Gate_Proj` + `Up_Proj` -> `SiLU` -> `Quant(Optional)` -> `Down_Proj` 融合为一个 Kernel。利用 NPU 的片上统一缓冲（Unified Buffer, UB）传递中间激活值，彻底消除了 Kernel Launch 开销。
-
-### 2. CPU 端：基于 ARM NEON 的高性能计算卸载
-**痛点**：当显存不足时，传统方案是将权重通过 PCIe 搬运至 NPU 计算。然而，PCIe 4.0 的实测带宽（~32GB/s）远低于鲲鹏 920 服务器的内存带宽（>200GB/s）。**“搬运数据”是最大的瓶颈。**
-
-**优化原理**：**计算向数据靠拢 (Compute Offloading)**
-*   **ARM NEON 指令集优化**：
-    针对鲲鹏 CPU（ARMv8.2-A），手写了 `gemm_q8_0` 与 `gemm_q4_0` 微内核。利用 `SDOT` (Signed Dot Product) 指令实现 4 路并行的 Int8/Int4 点积运算，并通过指令重排（Instruction Interleaving）掩盖内存加载延迟（Latency Hiding）。Int4 权重以 packed uint32 格式存储，每个元素 4-bit，显著降低内存占用。
-*   **NUMA 感知 (NUMA-Awareness)**：
-    鲲鹏 920 是多 NUMA 节点架构（多 Socket/Die）。跨 Socket 访问内存会导致带宽下降 40% 以上。
-    *   我们实现了一个**NUMA 绑核线程池 (`numa_threadpool.h`)**。
-    *   在推理前，将不同专家的权重物理地分配在不同的 NUMA 节点内存上。
-    *   计算时，严格绑定线程到对应的 NUMA 节点核心上执行，确保 **100% 的本地内存访问**。
-*   **异步流水线**：
-    通过 NPU 的 `aclrtLaunchCallback` 机制，在 NPU 计算 Attention 的同时，异步触发 CPU 开始计算 MoE 专家层，实现异构硬件的并行工作。
-
----
-
-## 🚀 性能表现 (Performance)
-
-**测试环境**: Huawei Ascend 910B + Kunpeng 920 (192 Cores, 8 NUMA Nodes, 4 Sockets)
-**测试模型**: Qwen3-MoE / MiniMax M2 (AWQ Quantized)
-
-### 1. NPU Kernel 性能 (Decoding Phase)
-对比 PyTorch 原生实现 (Ref) 与本项目自定义 Vector Kernel (Custom)。
-
-| Batch Size | Ref Latency (us) | **Custom Latency (us)** | Ref Bandwidth (GB/s) | **Custom Bandwidth (GB/s)** | **加速比** |
-| :---: | :---: | :---: | :---: | :---: | :---: |
-| **1** | 199.43 | **43.42** | 106.47 | **489.01** | **4.59x** |
-| **2** | 266.82 | **60.49** | 159.16 | **702.07** | **4.41x** |
-| **4** | 515.69 | **96.18** | 164.70 | **883.10** | **5.36x** |
-| **8** | 936.17 | **174.35** | 181.45 | **974.30** | **5.37x** |
-
-> **注**: 测试使用 BF16 精度 scale，更符合实际部署场景。
-
-### 2. CPU Kernel 性能 (Int8/Int4 Fused MoE)
-基于 NUMA 优化的 ARM Int8/Int4 算子实测性能。
-*配置: H=2048, I=768, TopK=8, E=128, 权重格式 Int8*
-
-#### 2 CPU (TP=4, 80 Threads)
-
-| Num Tokens | Avg Time (ms) | **Weight Bandwidth (GB/s)** | **Compute (GFLOPS)** |
-| :---: | :---: | :---: | :---: |
-| **1** | 0.29 | **137.94** | 259.66 |
-| **4** | 0.83 | **193.38** | 364.02 |
-| **8** | 1.45 | **221.69** | 417.29 |
-| **32** | 2.73 | **235.42** | 886.29 |
-| **128** | 4.11 | **155.97** | 2348.74 |
-| **1024** | 21.66 | **29.62** | 3568.60 |
-| **4096** | 84.15 | **7.63** | 3674.75 |
-
-#### 1 CPU (TP=2, 40 Threads)
-
-| Num Tokens | Avg Time (ms) | **Weight Bandwidth (GB/s)** | **Compute (GFLOPS)** |
-| :---: | :---: | :---: | :---: |
-| **1** | 0.49 | **81.92** | 154.20 |
-| **4** | 1.42 | **113.15** | 212.99 |
-| **8** | 2.48 | **129.37** | 243.52 |
-| **32** | 4.70 | **136.48** | 513.81 |
-| **128** | 7.53 | **85.17** | 1282.57 |
-| **1024** | 39.22 | **16.36** | 1971.05 |
-| **4096** | 153.28 | **4.19** | 2017.48 |
-
-> **结论**: 优化后的 CPU 算子在 2 CPU 配置下能提供 **~220+ GB/s** 的有效带宽，远超 PCIe 传输带宽 (~32GB/s)。在 NPU 显存受限时，直接在 CPU 上计算是更优解。
-
-### 3. 端到端性能 (Qwen3-30B-A3B AWQ Int4)
-
-***input_len = 128, output_len = 1024***
-
-#### CPU 推理 (1 Socket, 48 Cores)
-
-| Batch Size | Output Throughput (token/s) | Latency (s) |
-| :---: | :---: | :---: |
-| **1** | 43.91 | 23.78 |
-| **4** | 78.87 | 53.31 |
-| **8** | 110.41 | 76.81 |
-
-#### NPU 推理 (Ascend 910B)
-
-| Batch Size | Output Throughput (token/s) | Latency (s) |
-| :---: | :---: | :---: |
-| **1** | 96.43 | 10.76 |
-| **4** | 286.84 | 14.55 |
-| **8** | 405.01 | 20.50 |
-
----
-
-## 🗺️ 路线图 (Roadmap)
-
-### 第一阶段：高性能异构算子库 (Current Focus)
-- [x] **NPU**: 实现 Vector Core 加速的 W4A16 Fused MoE 算子。
-- [x] **CPU**: 实现基于 NUMA 感知的 ARM Int8 Fused MoE 算子。
-- [x] **CPU**: 升级算子至 **Int4** 精度，进一步降低内存占用并对齐 NPU 量化格式。
-
-### 第二阶段：动态弹性卸载机制 (Elastic Offloading)
-- [x] **固定显存预算的专家粒度缓存**：跨层共享固定 slot，不依赖运行时扩容 KV 池。
-- [x] **SGLang NPU Graph 适配**：图内固定双路径，图外 replay hook 更新 slot table，不修改上游源码。
-- [x] **基于激活频率的热点管理**：排除 graph padding 的滑动窗口 LFU、替换滞回和备用 slot。
-- [x] **精度无损 CPU/NPU 协同**：缓存命中走 NPU W4A16，miss 走 CPU Q4_0，最终贡献相加。
-- [ ] **TP>1 扩展**：rank-0 统一决策并广播 slot delta。
-
-> 当前动态缓存交付边界为 Qwen3 compressed-tensors Int4、TP=1；NPU kernel、CPU 扩展和真实 NPU Graph 端到端路径均已验证。
-
-Qwen3 TP=1 端到端验证已完成：K=1024 的稳态命中率约 68.5%，动态缓存 41.51 tok/s，相同条件全 CPU Q4_0 为 39.98 tok/s；320-token 输出逐字节一致。详见 `docs/bench_results/dynamic_expert_cache_qwen3.md`。
----
-
-## 📂 项目结构
+- NPU：Ascend C W4A16 fused MoE kernel，以及 Int4 权重 repack。
+- CPU：鲲鹏 ARM NEON / NUMA 感知的 Int8、Int4 MoE 后备引擎（`Int8-gemm/`）。
+- 动态专家缓存：跨所有 MoE 层共享固定 slot 池，按 decode route 频率的 LFU
+  策略管理热点专家。
+- 静态图兼容：缓存 buffer 和 `slot_table` 地址固定；替换在 graph replay 前的
+  图外边界发布，不需要 recapture graph。
+- 精度无损分流：NPU 只计算 cache hit，CPU 只计算 miss，二者的加权输出相加；
+  不丢弃任何被路由的专家贡献。
 
 ```text
-MoE-Ascend-Opt
-├── sglang/                 # 修改适配后的 SGLang 框架
-│   ├── python/sglang/srt/layers/moe/moe_offload.py  # 异构分发调度器 (NPU/CPU Router)
-│   └── ...
-├── sgl-kernel-npu/         # 自定义异构算子库
-│   ├── MoE-Ascend-Opt-main/
-│   │   ├── Int8-gemm/      # CPU ARM 优化核心代码
-│   │   │   ├── q8_gemm.cpp       # ARM NEON Int8 微内核
-│   │   │   ├── numa_threadpool.h # NUMA 绑核线程池实现
-│   │   │   ├── nanovllm_ops.cpp  # NPU Stream 回调与 PyTorch 绑定
-│   │   │   └── moe_infer.cpp     # 异构推理逻辑封装
-│   │   ├── ...
-│   └── csrc/grouped_gemv/  # NPU Ascend C 核心代码 (Vector Core)
-└── README.md
+topk routing
+    │
+    ├─ slot_table 命中 ──> NPU cached W4A16 MoE ─┐
+    └─ slot_table 未命中 -> CPU Q4_0 partial MoE ─┼─> add -> MoE 输出
+                                                   │
+图外 replay hook: 统计 decode route -> LFU 决策 -> 写备用 slot -> 发布 slot_table
 ```
 
----
+## 支持范围
 
-## 🛠️ 使用指南
+动态专家缓存当前已在 Qwen3 compressed-tensors 对称 Int4、TP=1 路径验证。
+它与全层 CPU 卸载 `--enable-moe-offload` 互斥，因为缓存模式本身已包含 CPU
+partial 后备。TP>1 的统一决策和 slot delta 广播尚未完成。
 
-### 1. 编译自定义算子库
-```bash
-cd MoE-Ascend-Opt-main/Int8-gemm
-# 编译 CPU 与 NPU 混合扩展
-python3 setup.py install
-```
+请保持 CUDA/NPU Graph 开启；不要为缓存模式传 `--disable-cuda-graph`。缓存替换
+依赖固定地址 tensor 和 graph 外 replay hook，关闭 graph 会偏离该路径的设计目标。
 
-### 2. 安装 SGLang
-```bash
-cd sglang/python
-pip install -e .
-```
+## 安装与构建
 
-### 3. 启动异构推理服务
-通过参数开启 ARM Expert Parallelism (EP)：
+运行环境需要 Ascend NPU、CANN 工具链和 NPU 版 SGLang。CPU 后备依赖 ARMv8.2+
+dotprod 环境；若只使用 NPU kernel，`Int8-gemm` 可以不安装。
 
 ```bash
-# 示例：将所有 MoE 层卸载至 CPU 运行 (模拟显存极度受限场景)
-# 设置 TP 线程数与 NUMA 节点匹配
-export NANOVLLM_TP_THREADS_PER_NODE=16 
+# 安装 Python 包
+pip install -e moe_ascend_npu/
 
-python3 -m sglang.launch_server \
-  --model /path/to/Qwen3-MoE-AWQ \
-  --sampling-backend ascend \
-  --dtype float16 \
-  --enable-arm-ep \
-  --arm-ep-start-layer 0 \
-  --tp-size 1
+# 构建 Ascend C kernel；脚本会安装 .pth 自动注入钩子
+cd moe_ascend_npu
+bash build_kernels.sh Ascend910_9382
+
+# 动态缓存或全层 CPU 卸载所需的 CPU 引擎
+cd ..
+pip install -e Int8-gemm/ --no-build-isolation
 ```
 
----
+`.pth` 会在解释器启动后等待 SGLang 导入完成，并仅在 NPU 进程安装补丁。需要
+手动重装或删除该钩子时：
 
-## ⚠️ 限制说明
+```bash
+python -m moe_ascend_npu._install_pth install
+python -m moe_ascend_npu._install_pth remove
+```
 
-1.  **硬件依赖**: 必须运行在 **Huawei Ascend 910B** (支持 AIV 指令) 和 **ARMv8.2+ CPU** (支持 dotprod 指令) 环境下。x86 架构无法运行本项目代码。
-2.  **量化格式**: 目前针对 **AWQ** (W4A16)、**Int8** 和 **Int4** 权重格式优化。Int4 格式与 AWQ 量化对齐，可显著降低内存占用。
-3.  **模型支持**: 已验证支持 **Qwen3-MoE** 系列和 **MiniMax M2** AWQ Int4 量化模型。
+## 启动动态专家缓存
+
+下面是 Qwen3 TP=1 的示例。默认值为 `K=256`、每轮最多替换 8 个专家、基础更新间隔
+16 个 decode replay、warmup 16 step、route 频率衰减 0.95。服务启动时会在 KV Cache
+规划前将 K 个 slot 按层均匀填满；实际部署应按显存预算和目标工作负载测量 K，
+而不是把默认值视为最佳值。
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0
+export NANOVLLM_TP_SIZE=2
+
+sglang serve \
+  --model-path /path/to/Qwen3-MoE-compressed-tensors-int4 \
+  --trust-remote-code \
+  --tp-size 1 \
+  --attention-backend ascend \
+  --enable-moe-expert-cache \
+  --moe-expert-cache-size 256 \
+  --moe-expert-cache-swap-per-update 8 \
+  --moe-expert-cache-update-interval 16 \
+  --moe-expert-cache-warmup-steps 16 \
+  --moe-expert-cache-decay 0.95 \
+  --cuda-graph-bs 1 2 4 8
+```
+
+关键参数：
+
+| 参数 | 默认值 | 含义 |
+| --- | ---: | --- |
+| `--enable-moe-expert-cache` | 关闭 | 启用固定预算的动态专家缓存 |
+| `--moe-expert-cache-size` | 256 | 全局活动 expert-instance slot 数 |
+| `--moe-expert-cache-swap-per-update` | 8 | 备用 slot 数和最大替换批量；缓存满载后每轮最多替换 8 个 |
+| `--moe-expert-cache-update-interval` | 16 | decode replay 的基础控制周期；满载后自动退避 |
+| `--moe-expert-cache-warmup-steps` | 16 | 开始动态替换前的有效 decode step 数 |
+| `--moe-expert-cache-decay` | 0.95 | decode route 频率 EMA 衰减系数 |
+
+Prefill 可以使用已有专家缓存，命中走 NPU、未命中走 CPU，但不进入热度统计，也不会触发替换；只有
+decode 驱动控制器。均匀 seed 后只在低频 decode 窗口做最多 8 个替换。替换按
+“写备用 slot → 发布 `slot_table` → 下一次 replay”执行，避免读到未完成搬运的权重。
+
+全层 CPU 卸载是独立模式：
+
+```bash
+sglang launch-server \
+  --model-path /path/to/model \
+  --attention-backend ascend \
+  --enable-moe-offload \
+  --moe-offload-quant-type q4_0
+```
+
+`--enable-moe-expert-cache` 和 `--enable-moe-offload` 不能同时使用。
+
+## 性能验证
+
+缓存收益取决于实际路由局部性、cache size、请求分布与控制面开销，不能由命中率
+线性推导。请用仓库中的 benchmark 脚本在目标模型与工作负载上复测；固定 prompt
+稳态结果不能外推为通用服务性能。
+
+## 测试
+
+```bash
+# NPU kernel、repack、缓存策略与 benchmark 脚本测试
+cd moe_ascend_npu
+bash tests/run_all.sh
+
+# 动态缓存端到端 smoke test
+python tests/benchmark_expert_cache_prompt.py \
+  --skip-cpu --cache-sizes 256 --requests 2 --output-tokens 32 \
+  --result-dir /tmp/moe_cache_prompt_smoke
+```
+
+## 项目结构
+
+```text
+MoE-Ascend-Opt/
+├── moe_ascend_npu/
+│   ├── csrc/                         # Ascend C W4A16 kernel
+│   ├── moe_ascend_npu/
+│   │   ├── cache.py                  # 固定 slot cache、LFU controller
+│   │   ├── kernels/repack.py         # Triton Int4 repack
+│   │   └── patches/                  # SGLang monkey patch 与 graph/cache 接入
+│   ├── tests/                        # 正确性、策略与缓存 benchmark
+│   └── docs/architecture.md          # 包架构与完整参数
+├── Int8-gemm/                        # nanovllm_ext：ARM NEON / NUMA CPU 引擎
+├── docs/design/dynamic_offload.md    # 动态专家缓存设计
+└── docs/bench_results/               # 可复现实验记录
+```
+
+## 文档
+
+- [包架构与参数](moe_ascend_npu/docs/architecture.md)
+- [专家粒度动态缓存设计](docs/design/dynamic_offload.md)

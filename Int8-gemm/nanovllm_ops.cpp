@@ -91,6 +91,8 @@ public:
             sources_.resize((size_t)layer_idx + 1);
         }
         TORCH_CHECK(!sources_[(size_t)layer_idx], "layer already registered");
+        TORCH_CHECK(active_slots_ == 0,
+                    "cannot register layers after expert cache seeding");
         sources_[(size_t)layer_idx] = handle;
         const size_t required = sources_.size() * (size_t)num_experts_;
         freq_.resize(required, 0.0);
@@ -117,6 +119,40 @@ public:
         return count;
     }
 
+    void seed_uniform(const torch::Tensor& plan) {
+        TORCH_CHECK(plan.device().is_cpu() && plan.scalar_type() == at::kLong
+                        && plan.is_contiguous() && plan.dim() == 2
+                        && plan.size(1) == 5,
+                    "uniform seed plan must be contiguous int64 CPU [B,5]");
+        TORCH_CHECK(!started_, "expert cache must be seeded before decode starts");
+        TORCH_CHECK(num_experts_ > 0 && !sources_.empty(),
+                    "expert cache scheduler has no registered layers");
+        const auto* rows = plan.data_ptr<int64_t>();
+        for (int64_t row = 0; row < plan.size(0); ++row) {
+            const int64_t layer = rows[row * 5];
+            const int64_t expert = rows[row * 5 + 1];
+            const int64_t slot = rows[row * 5 + 2];
+            TORCH_CHECK(rows[row * 5 + 3] == -1 && rows[row * 5 + 4] == -1,
+                        "uniform seed plan cannot evict an expert");
+            TORCH_CHECK(layer >= 0 && layer < (int64_t)sources_.size()
+                            && sources_[(size_t)layer],
+                        "uniform seed plan references an unregistered layer");
+            TORCH_CHECK(expert >= 0 && expert < num_experts_,
+                        "uniform seed plan references an invalid expert");
+            TORCH_CHECK(active_slots_ < cache_size_ && !free_slots_.empty(),
+                        "uniform seed plan exceeds the cache capacity");
+            TORCH_CHECK(slot == free_slots_.front(),
+                        "uniform seed slots must be assigned sequentially");
+            const int64_t flat = layer * num_experts_ + expert;
+            TORCH_CHECK(owner_slot_[(size_t)flat] < 0,
+                        "uniform seed plan contains a duplicate expert");
+            free_slots_.pop_front();
+            owner_slot_[(size_t)flat] = slot;
+            slot_owner_[(size_t)slot] = flat;
+            ++active_slots_;
+        }
+    }
+
     std::vector<torch::Tensor> last_stats() const {
         auto counters = torch::tensor(
             {replay_steps_, active_slots_, total_swaps_, last_window_total_,
@@ -132,6 +168,8 @@ private:
     int64_t schedule(int64_t valid_tokens, std::vector<PlanRow>& rows) {
         TORCH_CHECK(num_experts_ > 0 && !sources_.empty(),
                     "expert cache scheduler has no registered layers");
+        TORCH_CHECK(active_slots_ == cache_size_,
+                    "expert cache must be uniformly seeded before decode");
         if (!started_) {
             for (const auto& source : sources_) {
                 if (source) source->impl->reset_routing_stats();
@@ -919,7 +957,8 @@ static void moe_forward_npu_graph_partial_start(
     const torch::Tensor& routing_ids_npu,
     const torch::Tensor& topk_w_npu,
     const c10::intrusive_ptr<MoEInferHandle>& moe_h,
-    const c10::intrusive_ptr<MoEGraphContext>& ctx)
+    const c10::intrusive_ptr<MoEGraphContext>& ctx,
+    bool record_routing)
 {
     (void)moe_h;
     TORCH_CHECK(compute_ids_npu.sizes() == routing_ids_npu.sizes(),
@@ -928,7 +967,7 @@ static void moe_forward_npu_graph_partial_start(
     const size_t hb = hidden_npu.nbytes();
     const size_t ib = compute_ids_npu.nbytes();
     const size_t wb = topk_w_npu.nbytes();
-    ctx->args.record_routing = true;
+    ctx->args.record_routing = record_routing;
 
     TORCH_CHECK(aclrtMemcpyAsync(ctx->hidden_in.ptr, ctx->hidden_in.size,
                                 hidden_npu.data_ptr(), hb,
@@ -1085,6 +1124,7 @@ TORCH_LIBRARY_FRAGMENT(nanovllm, m) {
     m.class_<ExpertCacheScheduler>("ExpertCacheScheduler")
         .def(torch::init<int64_t,int64_t,int64_t,int64_t,double>())
         .def("register_layer", &ExpertCacheScheduler::register_layer)
+        .def("seed_uniform", &ExpertCacheScheduler::seed_uniform)
         .def("plan_out", &ExpertCacheScheduler::plan_out)
         .def("last_stats", &ExpertCacheScheduler::last_stats)
         .def("export_plan_out", &ExpertCacheScheduler::export_plan_out)
@@ -1106,7 +1146,7 @@ TORCH_LIBRARY_FRAGMENT(nanovllm, m) {
     m.def("moe_forward_npu_stream_partial(Tensor hidden, Tensor compute_ids, Tensor routing_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe) -> Tensor");
     m.def("moe_forward_npu_graph_out(Tensor hidden, Tensor topk_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe, __torch__.torch.classes.nanovllm.MoEGraphContext ctx, Tensor(a!) out) -> ()");
     m.def("moe_forward_npu_graph_partial_out(Tensor hidden, Tensor compute_ids, Tensor routing_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe, __torch__.torch.classes.nanovllm.MoEGraphContext ctx, Tensor(a!) out) -> ()");
-    m.def("moe_forward_npu_graph_partial_start(Tensor hidden, Tensor compute_ids, Tensor routing_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe, __torch__.torch.classes.nanovllm.MoEGraphContext ctx) -> ()");
+    m.def("moe_forward_npu_graph_partial_start(Tensor hidden, Tensor compute_ids, Tensor routing_ids, Tensor topk_w, __torch__.torch.classes.nanovllm.MoEInfer moe, __torch__.torch.classes.nanovllm.MoEGraphContext ctx, bool record_routing) -> ()");
     m.def("moe_forward_npu_graph_partial_wait_out(Tensor(a!) out, __torch__.torch.classes.nanovllm.MoEGraphContext ctx) -> ()");
     m.def("moe_forward_npu_eager_partial_wait_out(Tensor(a!) out, __torch__.torch.classes.nanovllm.MoEGraphContext ctx) -> ()");
 #endif
@@ -1145,9 +1185,11 @@ TORCH_LIBRARY_IMPL(nanovllm, PrivateUse1, m) {
               const torch::Tensor& routing_ids,
               const torch::Tensor& w,
               const c10::intrusive_ptr<MoEInferHandle>& moe,
-              const c10::intrusive_ptr<MoEGraphContext>& ctx) {
+              const c10::intrusive_ptr<MoEGraphContext>& ctx,
+              bool record_routing) {
                moe_forward_npu_graph_partial_start(
-                   hidden, compute_ids, routing_ids, w, moe, ctx);
+                   hidden, compute_ids, routing_ids, w, moe, ctx,
+                   record_routing);
            });
     m.impl("moe_forward_npu_graph_partial_wait_out",
            [](torch::Tensor out,
