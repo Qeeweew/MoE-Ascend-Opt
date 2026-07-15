@@ -154,6 +154,12 @@ class ExpertCacheManager:
                 self._cpp_scheduler.register_layer(layer_idx, handle)
 
     def ensure_allocated(self) -> None:
+        """Allocate the fixed HBM reservation; never defer it to warmup.
+
+        ``patches.cache_memory`` invokes this at the ModelRunner memory-pool
+        boundary, before KV Cache sizing.  Calls from the graph/replay paths
+        are retained as idempotent defensive fallbacks only.
+        """
         if self.slot_table is not None:
             return
         with self._lock:
